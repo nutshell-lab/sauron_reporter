@@ -16,7 +16,7 @@ IPs, headers or job arguments.
 
 ```elixir
 # mix.exs
-{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.1.0"}
+{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.2.0"}
 ```
 
 ErrorTracker is configured by the app (its repo is the local buffer):
@@ -47,6 +47,28 @@ the reporter, inert without a configuration. Options (`version_app`,
 
 The token is 24 random bytes, URL-safe, in Sauron's `REPORT_TOKENS` as
 `my-app:<token>` and in the app's sealed bundle — never in a repo.
+
+## Logs: one journal entry per event (0.2.0)
+
+`SauronReporter.JournalFormatter` makes a release's logs follow the
+fleet's log contract (infra `docs/logs.md`): under the journal, each
+event is one line, its line breaks escaped, after a `<N>` systemd turns
+into its priority — so an `[error]` is an error to Sauron's views, and a
+stack trace is one entry, not one per frame.
+
+```elixir
+# config/runtime.exs — only when the output is the journal
+if System.get_env("JOURNAL_STREAM") do
+  config :logger, :default_handler,
+    formatter:
+      SauronReporter.JournalFormatter.new(
+        format: "$metadata[$level] $message\n",
+        metadata: [:request_id]
+      )
+end
+```
+
+Its options are `Logger.Formatter.new/1`'s; the journal stamps the time.
 
 ## Develop
 
