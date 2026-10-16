@@ -43,9 +43,31 @@ defmodule SauronReporter.JournalFormatterTest do
     assert line == "<6>request_id=GN5Y [info] Sent 200\n"
   end
 
+  test "another formatter wrapped: its line, prefixed, kept on one line" do
+    {module, config} = JournalFormatter.new(formatter: {__MODULE__.Json, %{}})
+
+    line =
+      %{level: :error, msg: {:string, "boom\nat line 2"}, meta: %{}}
+      |> module.format(config)
+      |> IO.chardata_to_string()
+
+    assert "<3>" <> json = line
+
+    assert String.ends_with?(json, "}\n") and
+             not String.contains?(String.trim_trailing(json), "\n")
+
+    assert Jason.decode!(json) == %{"severity" => "error", "message" => "boom\nat line 2"}
+  end
+
   test "its config checks as :logger asks it to" do
     {module, config} = JournalFormatter.new()
     assert module.check_config(config) == :ok
     assert {:error, _} = module.check_config(:nonsense)
+  end
+
+  defmodule Json do
+    # A formatter like LoggerJSON's: one JSON object per event, newline-terminated.
+    def format(%{level: level, msg: {:string, message}}, _config),
+      do: [Jason.encode!(%{severity: level, message: message}), "\n"]
   end
 end

@@ -16,7 +16,7 @@ IPs, headers or job arguments.
 
 ```elixir
 # mix.exs
-{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.2.0"}
+{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.3.0"}
 ```
 
 ErrorTracker is configured by the app (its repo is the local buffer):
@@ -69,6 +69,9 @@ end
 ```
 
 Its options are `Logger.Formatter.new/1`'s; the journal stamps the time.
+An app with a formatter of its own wraps it instead (0.3.0) —
+`JournalFormatter.new(formatter: LoggerJSON.Formatters.Basic.new(...))`:
+its lines unchanged, their level put in front.
 
 ## Develop
 

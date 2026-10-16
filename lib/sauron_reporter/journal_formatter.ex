@@ -26,6 +26,14 @@ defmodule SauronReporter.JournalFormatter do
 
   The journal stamps each entry with its own time: a `$time` in the
   format is printed, not needed.
+
+  An app with its own formatter keeps it and wraps it: `formatter:` takes
+  any `:logger` formatter as `{module, config}` — WOD Lane's JSON lines,
+  for instance, one per event already, only lacking their level:
+
+      SauronReporter.JournalFormatter.new(
+        formatter: LoggerJSON.Formatters.Basic.new(metadata: {:all_except, [:conn, :socket]})
+      )
   """
 
   @levels %{
@@ -39,9 +47,19 @@ defmodule SauronReporter.JournalFormatter do
     debug: 7
   }
 
-  @doc "A `:logger` formatter: `{#{inspect(__MODULE__)}, config}`, options as `Logger.Formatter.new/1`."
+  @doc """
+  A `:logger` formatter: `{#{inspect(__MODULE__)}, config}`. Options as
+  `Logger.Formatter.new/1`, or `formatter: {module, config}` to wrap
+  another formatter instead.
+  """
   def new(options \\ []) do
-    {__MODULE__, %{inner: Logger.Formatter.new(options)}}
+    inner =
+      case Keyword.fetch(options, :formatter) do
+        {:ok, {module, _config} = formatter} when is_atom(module) -> formatter
+        :error -> Logger.Formatter.new(options)
+      end
+
+    {__MODULE__, %{inner: inner}}
   end
 
   @doc false
