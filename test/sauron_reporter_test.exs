@@ -205,6 +205,58 @@ defmodule SauronReporterTest do
     assert [{_, _minute, 5, 3}] = :ets.lookup(SauronReporter.Throttle, loop.fingerprint)
   end
 
+  test "what the client caused is not reported: a status below 500, a closed connection, the app's ignores" do
+    configure(ignore: [{"MyApp.ClientError", ~r/LiveView not connected/}, "MyApp.Noise"])
+
+    caused? = fn kind, reason ->
+      SauronReporter.client_caused?(error(%{kind: kind}), occurrence(%{}, reason))
+    end
+
+    # Plug.Exception says 400: the request was the problem.
+    assert caused?.("Elixir.Plug.BadRequestError", "could not parse")
+    assert caused?.("Bandit.TransportError", "Client reset stream normally")
+
+    assert caused?.(
+             "Elixir.MyApp.ClientError",
+             "unable to push hook event. LiveView not connected"
+           )
+
+    assert caused?.("MyApp.Noise", "anything")
+
+    # A crash is a 500; the same kind with another reason is the app's; an
+    # exception whose status cannot be read is reported.
+    refute caused?.("Elixir.RuntimeError", "boom")
+    refute caused?.("Elixir.MyApp.ClientError", "TypeError: x is undefined")
+    refute caused?.("Elixir.Not.A.Loaded.Module", "boom")
+  end
+
+  test "a client-caused occurrence is not sent at all" do
+    test = self()
+
+    Req.Test.allow(SauronReporter, self(), fn ->
+      Process.whereis(SauronReporter.TaskSupervisor)
+    end)
+
+    Req.Test.stub(SauronReporter, fn conn ->
+      send(test, :posted)
+      Plug.Conn.send_resp(conn, 202, "")
+    end)
+
+    fire(
+      error(%{kind: "Bandit.TransportError", fingerprint: "EF" <> String.duplicate("0", 62)}),
+      occurrence()
+    )
+
+    refute_receive :posted, 200
+
+    fire(
+      error(%{kind: "Elixir.RuntimeError", fingerprint: "AA" <> String.duplicate("1", 62)}),
+      occurrence()
+    )
+
+    assert_receive :posted, 1_000
+  end
+
   defmodule Redactor do
     def reason(reason), do: String.replace(reason, ~r/\d+/, "[n]")
   end

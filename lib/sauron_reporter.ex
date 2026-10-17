@@ -27,8 +27,15 @@ defmodule SauronReporter do
         version_app: :m2,                        # whose vsn is release.version (default: the last of otp_apps)
         redact: {M2.Redactor, :reason},          # fun(reason) -> reason, after the email mask
         self_noise: ["M2.Observability."],       # more modules whose errors never report
+        ignore: [{"MyApp.ClientError", ~r/LiveView not connected/}], # {kind, reason regex}, or a kind alone
         deliver: nil,                            # or {mod, fun}(app, payload): in-process, Sauron's own
         req_options: []                          # tests inject a Req.Test plug
+
+  What the client caused is not reported (0.4.0): an exception whose HTTP
+  status (`Plug.Exception`) is below 500 — a 404 `NotFound`, a 400 from
+  Bandit on a client's timeout — and `Bandit.TransportError`, a client
+  that closed its connection. ErrorTracker still keeps them in the app.
+  `ignore` adds an app's own (kinds, with a pattern on the reason or not).
 
   Inert unless `app` is set and either `url` and `token` or `deliver`:
   the configuration is read when the application starts, so it belongs
@@ -86,7 +93,7 @@ defmodule SauronReporter do
 
   @doc false
   def handle_event(@event, _measurements, %{error: error, occurrence: occurrence}, _config) do
-    if not self_noise?(error) do
+    if not self_noise?(error) and not client_caused?(error, occurrence) do
       case take(error.fingerprint) do
         {:send, dropped} ->
           Task.Supervisor.start_child(__MODULE__.TaskSupervisor, fn ->
@@ -216,6 +223,37 @@ defmodule SauronReporter do
   end
 
   defp self_noise?(_), do: false
+
+  # The client closed its connection: nothing the app did, nothing to fix.
+  @client_kinds ["Bandit.TransportError"]
+
+  @doc false
+  def client_caused?(error, occurrence) do
+    kind = String.replace_prefix(error.kind || "", "Elixir.", "")
+    reason = occurrence.reason || error.reason || ""
+
+    kind in @client_kinds or below_500?(kind) or
+      Enum.any?(config()[:ignore] || [], &ignored?(&1, kind, reason))
+  end
+
+  defp ignored?({k, %Regex{} = pattern}, kind, reason), do: short(k) == kind and reason =~ pattern
+  defp ignored?(k, kind, _reason) when is_binary(k) or is_atom(k), do: short(k) == kind
+  defp ignored?(_, _kind, _reason), do: false
+
+  defp short(k), do: k |> to_string() |> String.replace_prefix("Elixir.", "")
+
+  # The status Phoenix answers an exception with, from its kind alone (an
+  # occurrence keeps no struct): below 500 is the client's request, not a
+  # failure. An exception whose status cannot be read so is reported.
+  defp below_500?(kind) do
+    module = Module.concat([kind])
+
+    Code.ensure_loaded?(Plug.Exception) and Code.ensure_loaded?(module) and
+      function_exported?(module, :__struct__, 0) and
+      Plug.Exception.status(struct(module)) < 500
+  rescue
+    _ -> false
+  end
 
   # At most @per_minute sends per group and minute; the rest are counted
   # and ride on the next send.
