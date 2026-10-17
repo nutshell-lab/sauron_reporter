@@ -16,7 +16,7 @@ IPs, headers or job arguments.
 
 ```elixir
 # mix.exs
-{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.4.0"}
+{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.4.1"}
 ```
 
 ErrorTracker is configured by the app (its repo is the local buffer):
@@ -53,8 +53,8 @@ The token is 24 random bytes, URL-safe, in Sauron's `REPORT_TOKENS` as
 A 404, a 400, a client that closed its connection: an exception whose
 HTTP status (`Plug.Exception`) is below 500, and `Bandit.TransportError`,
 stay in the app's ErrorTracker but are not sent to Sauron. `ignore:`
-adds an app's own — `[{"MyApp.ClientError", ~r/LiveView not connected/}]`,
-or a kind alone.
+adds an app's own — `[{"MyApp.ClientError", "LiveView not connected"}]`
+(a kind and a text within the reason), or a kind alone.
 
 ## Logs: one journal entry per event (0.2.0)
 

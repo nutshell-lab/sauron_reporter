@@ -206,7 +206,7 @@ defmodule SauronReporterTest do
   end
 
   test "what the client caused is not reported: a status below 500, a closed connection, the app's ignores" do
-    configure(ignore: [{"MyApp.ClientError", ~r/LiveView not connected/}, "MyApp.Noise"])
+    configure(ignore: [{"MyApp.ClientError", "LiveView not connected"}, "MyApp.Noise"])
 
     caused? = fn kind, reason ->
       SauronReporter.client_caused?(error(%{kind: kind}), occurrence(%{}, reason))

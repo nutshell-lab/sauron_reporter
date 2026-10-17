@@ -27,7 +27,7 @@ defmodule SauronReporter do
         version_app: :m2,                        # whose vsn is release.version (default: the last of otp_apps)
         redact: {M2.Redactor, :reason},          # fun(reason) -> reason, after the email mask
         self_noise: ["M2.Observability."],       # more modules whose errors never report
-        ignore: [{"MyApp.ClientError", ~r/LiveView not connected/}], # {kind, reason regex}, or a kind alone
+        ignore: [{"MyApp.ClientError", "LiveView not connected"}], # {kind, text in the reason}, or a kind alone
         deliver: nil,                            # or {mod, fun}(app, payload): in-process, Sauron's own
         req_options: []                          # tests inject a Req.Test plug
 
@@ -35,7 +35,9 @@ defmodule SauronReporter do
   status (`Plug.Exception`) is below 500 — a 404 `NotFound`, a 400 from
   Bandit on a client's timeout — and `Bandit.TransportError`, a client
   that closed its connection. ErrorTracker still keeps them in the app.
-  `ignore` adds an app's own (kinds, with a pattern on the reason or not).
+  `ignore` adds an app's own: a kind, or `{kind, text}` — the text
+  matched within the reason. Text, not a regex: on OTP 28 a compiled
+  regex is a runtime reference, not a value runtime config should hold.
 
   Inert unless `app` is set and either `url` and `token` or `deliver`:
   the configuration is read when the application starts, so it belongs
@@ -235,6 +237,9 @@ defmodule SauronReporter do
     kind in @client_kinds or below_500?(kind) or
       Enum.any?(config()[:ignore] || [], &ignored?(&1, kind, reason))
   end
+
+  defp ignored?({k, text}, kind, reason) when is_binary(text),
+    do: short(k) == kind and String.contains?(reason, text)
 
   defp ignored?({k, %Regex{} = pattern}, kind, reason), do: short(k) == kind and reason =~ pattern
   defp ignored?(k, kind, _reason) when is_binary(k) or is_atom(k), do: short(k) == kind
