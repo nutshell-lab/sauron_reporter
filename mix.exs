@@ -4,12 +4,12 @@ defmodule SauronReporter.MixProject do
   def project do
     [
       app: :sauron_reporter,
-      version: "0.4.1",
+      version: "0.5.0",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description:
-        "Sends an app's ErrorTracker occurrences to Sauron, the Nutshell fleet's error manager.",
+        "Sends an app's ErrorTracker occurrences and analytics events to Sauron, the Nutshell fleet's error manager.",
       source_url: "https://github.com/nutshell-lab/sauron_reporter"
     ]
   end
@@ -25,6 +25,12 @@ defmodule SauronReporter.MixProject do
     [
       {:error_tracker, "~> 0.6"},
       {:req, "~> 0.5"},
+      # Analytics (0.5.0): the plug and the LiveView hook. ErrorTracker
+      # brings both already; named for what this library calls.
+      {:plug, "~> 1.14"},
+      {:phoenix_live_view, "~> 1.0"},
+      # LiveViewTest's HTML parser, for the hook's tests.
+      {:lazy_html, ">= 0.1.0", only: :test},
       {:telemetry, "~> 1.0"}
     ]
   end
