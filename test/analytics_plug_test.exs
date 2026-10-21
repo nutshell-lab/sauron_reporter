@@ -185,6 +185,20 @@ defmodule SauronReporter.AnalyticsPlugTest do
     assert events() == []
   end
 
+  test "a secret in the path (0.6.1): masked in the page view and the timing; the route as it is" do
+    token = "Xb3kQ9vN2mLp7RtY5wZc1HfJ8sDg4AeU"
+    request(:get, "https://www.example.fr/offres/#{token}")
+
+    assert [
+             %{"kind" => "timing", "path" => "/offres/:token", "route" => "/offres/:id"},
+             %{"kind" => "page_view", "path" => "/offres/:token", "route" => "/offres/:id"}
+           ] = events()
+
+    configure_analytics(redact_paths: ["/offres/:offer"])
+    request(:get, "https://www.example.fr/offres/short")
+    assert [%{"path" => "/offres/:offer"}, %{"path" => "/offres/:offer"}] = events()
+  end
+
   test "page_views: false and timings: false keep one of the two" do
     request(:get, "https://www.example.fr/offres/1", plug: [page_views: false])
     assert kinds(events()) == ["timing"]

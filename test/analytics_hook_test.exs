@@ -191,6 +191,44 @@ defmodule SauronReporter.AnalyticsHookTest do
     assert events() == []
   end
 
+  describe "paths (0.6.1)" do
+    test "ignore_paths: no live page view there, as the plug sends none" do
+      configure_analytics(ignore_paths: ["/pages/hidden"])
+      {:ok, view, _html} = live(browser(), "/pages/a")
+      render_patch(view, "/pages/hidden")
+      assert events() == []
+
+      # Out of it, counted, the hidden page only a host.
+      render_patch(view, "/pages/b")
+      assert [%{"path" => "/pages/b", "referrer" => "www.example.com"}] = events()
+
+      conn = put_connect_params(browser(), %{"_live_referer" => "https://www.google.com/"})
+      {:ok, _view, _html} = live(conn, "/pages/hidden")
+      assert events() == []
+
+      configure_analytics(ignore_paths: ["/app"])
+      {:ok, view, _html} = live(browser(), "/app/a")
+      render_patch(view, "/app/b")
+      assert events() == []
+    end
+
+    test "a secret in the path: masked, or the app's pattern; track/3 alike" do
+      token = "Xb3kQ9vN2mLp7RtY5wZc1HfJ8sDg4AeU"
+      {:ok, view, _html} = live(browser(), "/pages/a")
+      render_patch(view, "/pages/#{token}")
+      render_click(view, "signup")
+
+      assert [
+               %{"kind" => "page_view", "path" => "/pages/:token", "route" => "/pages/:id"},
+               %{"kind" => "event", "path" => "/pages/:token"}
+             ] = events()
+
+      configure_analytics(redact_paths: ["/app/:code"])
+      {:ok, _view, _html} = live(browser(), "/app/short")
+      assert [%{"path" => "/app/:code"}] = events()
+    end
+  end
+
   describe "ours (0.6.0)" do
     setup do
       configure_analytics(ignore_emails: ["@nutshell-lab.com"])

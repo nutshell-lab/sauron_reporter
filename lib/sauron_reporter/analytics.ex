@@ -20,6 +20,8 @@ defmodule SauronReporter.Analytics do
           ignore_emails: [],         # ["@nutshell-lab.com"]: those users are never counted
           trust_forwarded: false,    # true | :last | :first — the IP from X-Forwarded-For
           ignore_paths: ["/metrics"],# more paths never reported (prefixes, by segment)
+          redact_paths: [],          # ["/annuler/:token"]: secret-bearing routes, sent as their pattern
+          mask_tokens: true,         # false: token-shaped segments sent as they are
           send_bots: false,          # true sends crawlers' page views too
           flush_every: 5_000,        # ms between two sends
           batch_size: 50,            # a send as soon as this many wait
@@ -53,6 +55,33 @@ defmodule SauronReporter.Analytics do
   Ours sends no page view and no custom event (`track/3` answers `:ok`
   and sends nothing); its timings still go, server performance is not
   about who.
+
+  **Paths carry no secret (0.6.1).** A path leaves the app without its
+  query or fragment, and without the secrets a route puts in its
+  segments — a magic sign-in link, a cancel link, a calendar feed:
+
+    * `redact_paths` — the app's secret-bearing routes, as patterns
+      matched against the whole path, segment by segment: a literal
+      segment matches itself, `:name` any segment and is sent as
+      `:name`, `*` any segment and is sent as it is (a locale prefix:
+      `"/*/magiclink/:token"`). The first pattern that matches applies:
+      `"/rendez-vous/:token/calendrier.ics"` sends
+      `/rendez-vous/Xb3…/calendrier.ics` as
+      `/rendez-vous/:token/calendrier.ics`. A trailing slash is kept,
+      not matched. An app with locale prefixes lists each shape.
+    * then, unless `mask_tokens: false`, every segment that looks like
+      a secret is sent as `:token` (`token?/1`): a hex string of 32
+      characters or more; three dot-separated base64url parts one of
+      which is secret-shaped (a JWT, a `Phoenix.Token`); or 20
+      characters or more of `[A-Za-z0-9_-]` (two `=` of padding
+      allowed) holding a digit or both cases, that is not a lowercase
+      slug (`l-ia-dans-un-back-office-2024`). A UUID is an id, never
+      masked; so are integers, slugs and short segments.
+
+  The router's pattern (`route`) is sent as it is; the referrer is a host
+  only. Sauron masks token-shaped segments again when it takes an event,
+  so a client that forgets is caught there; `redact_paths` is the app's
+  word for the tokens the shape test cannot see.
 
   Signed out, ours is still ours: the plug answers an ours request with
   the cookie `sauron_ignore=1` (a year, `/`, `HttpOnly`, `SameSite=Lax`,
@@ -91,6 +120,15 @@ defmodule SauronReporter.Analytics do
   @max_props 10
   @prop_key 40
   @prop_value 200
+
+  # Token-shaped path segments (0.6.1). Sauron's ingest masks paths with
+  # the same rules (`Sauron.Analytics.Ingest`): the two must agree.
+  @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
+  @hex ~r/\A[0-9a-f]{32,}\z/i
+  @signed ~r/\A[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){2}\z/
+  @secret ~r/\A[A-Za-z0-9_-]{20,}={0,2}\z/
+  @slug ~r/\A[a-z0-9]+(?:-[a-z0-9]+)+\z/
+  @masked ":token"
 
   @ignore_paths ~w(/assets /fonts /images /favicon.ico /robots.txt /sitemap.xml /live /phoenix /health /healthz)
 
@@ -245,6 +283,76 @@ defmodule SauronReporter.Analytics do
 
   def ignored_path?(_), do: false
 
+  @doc """
+  A path as it leaves the app (0.6.1): the first of `redact_paths` that
+  matches it puts its own `:name` in place of each `:name` segment, then
+  each token-shaped segment left becomes `:token` (`token?/1`), unless
+  `mask_tokens: false`. See the moduledoc. `nil` if it cannot be read.
+  """
+  def redact_path(path) when is_binary(path) do
+    segments = String.split(path, "/")
+
+    segments =
+      Enum.find_value(List.wrap(setting(:redact_paths, [])), segments, &by_pattern(&1, segments))
+
+    if setting(:mask_tokens, true) == false,
+      do: Enum.join(segments, "/"),
+      else: Enum.map_join(segments, "/", &if(token?(&1), do: @masked, else: &1))
+  rescue
+    _ -> nil
+  end
+
+  def redact_path(_), do: nil
+
+  # The pattern's segments against the path's, a trailing slash aside:
+  # nil unless every one matches.
+  defp by_pattern(pattern, segments) do
+    pattern = pattern |> to_string() |> String.trim_trailing("/") |> String.split("/")
+
+    {segments, trailing} =
+      case Enum.split(segments, -1) do
+        {[_ | _] = rest, [""]} -> {rest, [""]}
+        _ -> {segments, []}
+      end
+
+    if length(pattern) == length(segments) do
+      Enum.zip(pattern, segments)
+      |> Enum.reduce_while([], fn
+        {":" <> _ = name, segment}, acc when segment != "" -> {:cont, [name | acc]}
+        {"*", segment}, acc when segment != "" -> {:cont, [segment | acc]}
+        {same, same}, acc -> {:cont, [same | acc]}
+        _, _acc -> {:halt, nil}
+      end)
+      |> case do
+        nil -> nil
+        matched -> Enum.reverse(matched, trailing)
+      end
+    end
+  end
+
+  @doc """
+  Whether a path segment looks like a secret (0.6.1): a hex string of 32
+  characters or more; three dot-separated base64url parts, one of them
+  secret-shaped (a JWT, a `Phoenix.Token`); or a secret-shaped segment —
+  20 characters or more of `[A-Za-z0-9_-]` (up to two `=` after), with a
+  digit or both cases, not a lowercase slug. A UUID never is.
+  """
+  def token?(segment) when is_binary(segment) do
+    cond do
+      Regex.match?(@uuid, segment) -> false
+      Regex.match?(@hex, segment) -> true
+      Regex.match?(@signed, segment) -> segment |> String.split(".") |> Enum.any?(&secret?/1)
+      true -> secret?(segment)
+    end
+  end
+
+  def token?(_), do: false
+
+  defp secret?(segment) do
+    Regex.match?(@secret, segment) and not Regex.match?(@slug, segment) and
+      (segment =~ ~r/[0-9]/ or (segment =~ ~r/[a-z]/ and segment =~ ~r/[A-Z]/))
+  end
+
   @doc "Counters since boot: `%{sent:, dropped:, failed:, buffered:}`."
   def stats, do: Buffer.stats()
 
@@ -359,8 +467,9 @@ defmodule SauronReporter.Analytics do
   @doc false
   def path(nil), do: nil
 
+  # Never the query nor the fragment, never a secret (`redact_path/1`).
   def path(path) when is_binary(path) do
-    path |> String.split(["?", "#"], parts: 2) |> hd() |> cut(1_000)
+    path |> String.split(["?", "#"], parts: 2) |> hd() |> redact_path() |> cut(1_000)
   end
 
   def path(_), do: nil

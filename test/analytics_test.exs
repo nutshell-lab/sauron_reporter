@@ -202,6 +202,136 @@ defmodule SauronReporter.AnalyticsTest do
     end
   end
 
+  describe "paths carry no secret (0.6.1)" do
+    # A booking's cancel token (phx-cms: 24 random bytes, url-safe), an
+    # AshAuthentication magic link's JWT, a Phoenix.Token.
+    @booking "Xb3kQ9vN2mLp7RtY5wZc1HfJ8sDg4AeU"
+    @jwt "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyPzEyMyJ9.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    @phoenix_token "SFMyNTY.g2gDbQAAAAZ1c2VyOjFuBgCQ8VxXkwFiAAFRgA.k3lC9vR8sXqY2Wm-ZtP0aE7nH5jU4oL1iG6fD3bQ_cA"
+
+    test "token-shaped segments: hex, signed, long url-safe with a digit or both cases" do
+      for segment <- [
+            @booking,
+            # The same, drawn without a digit: both cases tell.
+            "XbkQvNmLpRtYwZcHfJsDgAeUoPiKjMnB",
+            @jwt,
+            @phoenix_token,
+            String.duplicate("a1b2c3d4", 4),
+            :crypto.strong_rand_bytes(32) |> Base.encode16(),
+            :crypto.strong_rand_bytes(16) |> Base.url_encode64(),
+            # Lowercase, one word, a digit: base32, not a slug.
+            "mfrggzdfmztwq2lknnwg23tp",
+            "aB3dE5gH7jK9mN1pQ2rS"
+          ],
+          do: assert(Analytics.token?(segment), segment)
+    end
+
+    test "not a secret: slugs, ids, UUIDs, file names, short or plain words" do
+      for segment <- [
+            "l-ia-dans-un-back-office",
+            "why-we-build-in-elixir",
+            "rapport-annuel-2024-version-finale-v2",
+            "comment-participer",
+            "with_invitation",
+            "calendrier.ics",
+            "jquery.min.js",
+            "app-1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d.css",
+            "0b1e7f7c-6a40-4b8e-9d1f-3c5a2e8f9b10",
+            "0B1E7F7C-6A40-4B8E-9D1F-3C5A2E8F9B10",
+            "42",
+            "1234567890123456789",
+            "aB3dE5gH7jK9mN1pQ2r",
+            "patrimoine",
+            "administrationgenerale",
+            ":id",
+            ""
+          ],
+          do: refute(Analytics.token?(segment), segment)
+
+      refute Analytics.token?(nil)
+    end
+
+    test "the paths of our apps, as they are" do
+      for path <- [
+            "/dossiers/l-ia-dans-un-back-office",
+            "/en/blog/why-we-build-in-elixir",
+            "/patrimoine/0b1e7f7c-6a40-4b8e-9d1f-3c5a2e8f9b10/5f0c2a9e-1d3b-4c7a-8e6f-2b9d4a1c3e70",
+            "/patrimoine/12/345",
+            "/rendez-vous/annuler",
+            "/",
+            "/offres/"
+          ],
+          do: assert(Analytics.path(path) == path, path)
+    end
+
+    test "a token-shaped segment is sent as :token, wherever it is" do
+      assert Analytics.path("/magic_link/#{@jwt}") == "/magic_link/:token"
+
+      assert Analytics.path("/rendez-vous/annuler/#{@booking}?x=1") ==
+               "/rendez-vous/annuler/:token"
+
+      assert Analytics.path("/rendez-vous/#{@booking}/calendrier.ics") ==
+               "/rendez-vous/:token/calendrier.ics"
+
+      assert Analytics.path("/fr/checkin/ticket/#{@phoenix_token}/") ==
+               "/fr/checkin/ticket/:token/"
+    end
+
+    test "mask_tokens: false sends them as they are" do
+      configure_analytics(mask_tokens: false)
+      assert Analytics.path("/magic_link/#{@jwt}") == "/magic_link/#{@jwt}"
+    end
+
+    test "redact_paths: the whole path by segment, :name sent as itself, * kept" do
+      configure_analytics(
+        mask_tokens: false,
+        redact_paths: [
+          "/annuler/:token",
+          "/rendez-vous/:token/calendrier.ics",
+          "/*/magiclink/:token",
+          "/invitations/:id/:code/"
+        ]
+      )
+
+      assert Analytics.path("/annuler/short") == "/annuler/:token"
+      assert Analytics.path("/annuler/short/") == "/annuler/:token/"
+
+      assert Analytics.path("/rendez-vous/abc/calendrier.ics") ==
+               "/rendez-vous/:token/calendrier.ics"
+
+      assert Analytics.path("/en/magiclink/abc") == "/en/magiclink/:token"
+      assert Analytics.path("/invitations/7/abc") == "/invitations/:id/:code"
+
+      # The whole path: not a prefix, not a shorter one, not an empty segment.
+      for path <- [
+            "/annuler/short/plus",
+            "/annuler",
+            "/annuler/",
+            "/x/annuler/short",
+            "/magiclink/abc",
+            "/rendez-vous/abc/autre.ics",
+            "/en//magiclink/abc"
+          ],
+          do: assert(Analytics.path(path) == path, path)
+    end
+
+    test "the first pattern that matches applies; masking follows it" do
+      configure_analytics(redact_paths: ["/a/:first", "/a/:second", "/b/:code"])
+      assert Analytics.path("/a/1") == "/a/:first"
+      assert Analytics.path("/b/x/#{@booking}") == "/b/x/:token"
+    end
+
+    test "a pattern that cannot be read loses the path, never leaks it" do
+      configure_analytics(redact_paths: [%{not: "a pattern"}])
+      assert Analytics.path("/annuler/#{@booking}") == nil
+    end
+
+    test "track/3: the path without its secret" do
+      Analytics.track(%{site: "www.example.fr", path: "/annuler/#{@booking}"}, "cancel")
+      assert [%{"path" => "/annuler/:token"}] = flushed_events()
+    end
+  end
+
   describe "bot?/1" do
     test "Sauron's own test, monitors included" do
       for ua <- [

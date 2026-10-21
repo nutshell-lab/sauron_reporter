@@ -28,7 +28,14 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         URL in its connect params (`_live_referer`): its first
         `handle_params` is a page view;
       * a reconnection (`_mounts` > 0) and a patch that only changes the
-        query are not.
+        query are not;
+      * nor a page under the paths the plug never reports — assets, the
+        live socket, the app's `ignore_paths` (0.6.1; a patch from it to
+        another page counts, its referrer the host only).
+
+    The path is sent as the plug sends it (0.6.1): the app's
+    `redact_paths` applied, token-shaped segments masked (see
+    `SauronReporter.Analytics`), never the query.
 
     The visitor's IP and user agent come from the socket's `connect_info`,
     read once at mount — the endpoint must pass them:
@@ -116,11 +123,14 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         {:cont, socket}
     end
 
-    # Ours: by the session at mount, or by the assigns now.
+    # A path the plug would not report (0.6.1); ours: by the session at
+    # mount, or by the assigns now.
     defp record(socket, context, uri, referrer) do
-      if context.ours? or Analytics.ours_assigns?(socket.assigns),
-        do: :ours,
-        else: push(socket, context, uri, referrer)
+      cond do
+        Analytics.ignored_path?(uri.path) -> :ignored
+        context.ours? or Analytics.ours_assigns?(socket.assigns) -> :ours
+        true -> push(socket, context, uri, referrer)
+      end
     end
 
     defp push(socket, context, uri, referrer) do

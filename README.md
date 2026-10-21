@@ -17,7 +17,7 @@ IPs, headers or job arguments.
 
 ```elixir
 # mix.exs
-{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.6.0"}
+{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.6.1"}
 ```
 
 ErrorTracker is configured by the app (its repo is the local buffer):
@@ -65,7 +65,8 @@ config :sauron_reporter,
     enabled: System.get_env("SAURON_ANALYTICS") in ~w(1 true),
     user_key: System.get_env("SAURON_USER_KEY"), # optional: no key, no `user` sent
     sites: ["www.example.fr"],                   # optional allowlist of hosts
-    ignore_emails: ["@nutshell-lab.com"]         # optional: our people are not counted (0.6.0)
+    ignore_emails: ["@nutshell-lab.com"],        # optional: our people are not counted (0.6.0)
+    redact_paths: ["/annuler/:token"]            # optional: secret-bearing routes, sent as their pattern (0.6.1)
   ]
 ```
 
@@ -163,6 +164,46 @@ end
 Without it, everything else holds — ours by the user, by the assign, by
 the cookie on every HTTP request — but a signed-out person's live
 navigations are counted.
+
+## Paths carry no secret (0.6.1)
+
+A route that puts a secret in its path — a magic sign-in link, a
+booking's cancel link, a calendar feed, a check-in ticket — would hand a
+working token to Sauron with the page view. So a path leaves the app
+without its query or fragment (as before) and without its secrets:
+
+- **`redact_paths`**: the app's secret-bearing routes, as patterns
+  matched against the whole path, segment by segment. A literal segment
+  matches itself; `:name` matches any segment and is sent as `:name`;
+  `*` matches any segment and is sent as it is. The first pattern that
+  matches applies, and a trailing slash is kept:
+
+  ```elixir
+  redact_paths: [
+    "/rendez-vous/annuler/:token",           # /rendez-vous/annuler/Xb3…  → /rendez-vous/annuler/:token
+    "/rendez-vous/:token/calendrier.ics",
+    "/magiclink/:token", "/*/magiclink/:token" # an app with locale prefixes lists each shape
+  ]
+  ```
+
+- **Token-shaped segments**, on by default (`mask_tokens: false` turns
+  it off): a segment is sent as `:token` when it is a hex string of 32
+  characters or more; three dot-separated base64url parts, one of them
+  secret-shaped (a JWT, a `Phoenix.Token`); or 20 characters or more of
+  `[A-Za-z0-9_-]` (up to two `=` after) with a digit or both cases, that
+  is not a lowercase slug (`^[a-z0-9]+(-[a-z0-9]+)+$`). UUIDs, integers,
+  slugs (`/dossiers/l-ia-dans-un-back-office`) and short segments are
+  never masked.
+
+The shape test is a net, not a list: a random token can, now and then,
+look like neither (24 random bytes drawn without a digit and in one
+case) — `redact_paths` is the app's word for its own. Page views, live
+navigations, timings and custom events all send the same path; the
+router's pattern (`route`) and the referrer (a host only) carry no
+secret. Sauron masks token-shaped segments again when it takes an event.
+
+The hook now honours `ignore_paths` as the plug does: no live page view
+on a path the plug never reports.
 
 ## What the client caused is not reported (0.4.0)
 

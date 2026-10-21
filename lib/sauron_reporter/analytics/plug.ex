@@ -16,7 +16,9 @@ defmodule SauronReporter.Analytics.Plug do
   referrer's host, the UTM parameters, and the signed-in user, hashed
   (`:sauron_user_id`, see `SauronReporter.Analytics`). Assets, health
   checks and the live socket are never reported (`ignore_paths` adds
-  more).
+  more). The path goes without its secrets (0.6.1): the app's
+  `redact_paths` applied, token-shaped segments masked — see
+  `SauronReporter.Analytics`.
 
       # endpoint.ex — after Plug.Static (assets are not timed) and the
       # proxy handling that sets remote_ip:

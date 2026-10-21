@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.1 — 2026-10-21
+
+Paths carry no secret: a magic sign-in link, a cancel link, a calendar
+feed no longer hand a working token to Sauron.
+
+- `analytics: [redact_paths: ["/annuler/:token", "/*/magiclink/:token"]]`:
+  route patterns matched against the whole path, segment by segment —
+  a literal matches itself, `:name` any segment and is sent as `:name`,
+  `*` any segment, sent as it is. The first that matches applies; a
+  trailing slash is kept. Default `[]`.
+- Token-shaped segments are sent as `:token`, on by default
+  (`mask_tokens: false` turns it off): a hex string of 32 characters or
+  more; three dot-separated base64url parts, one secret-shaped (a JWT,
+  a `Phoenix.Token`); 20 characters or more of `[A-Za-z0-9_-]` (two `=`
+  of padding allowed) with a digit or both cases, not a lowercase slug.
+  UUIDs, integers, slugs and short segments are kept.
+- Both apply to every path sent: page views, live navigations, timings,
+  custom events (`track/3` from a conn, a socket or a map's `:path`).
+  The route and the referrer (a host) were never a path.
+- The hook honours `ignore_paths` as the plug does: no live page view
+  on a path the plug never reports.
+
 ## 0.6.0 — 2026-10-21
 
 Our own people are not counted: an app never reports its own staff —
