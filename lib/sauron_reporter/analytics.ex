@@ -16,7 +16,8 @@ defmodule SauronReporter.Analytics do
           # optional:
           user_key: "...",           # HMAC key for user ids; without it no `user` is sent
           sites: ["www.example.fr"], # only these hosts are reported (default: any)
-          user_assign: :current_user,# an assign whose `.id` is the user (after :sauron_user_id)
+          user_assign: :current_user,# the user's assign: its `.id` (after :sauron_user_id), its `.email`
+          ignore_emails: [],         # ["@nutshell-lab.com"]: those users are never counted
           trust_forwarded: false,    # true | :last | :first — the IP from X-Forwarded-For
           ignore_paths: ["/metrics"],# more paths never reported (prefixes, by segment)
           send_bots: false,          # true sends crawlers' page views too
@@ -39,8 +40,25 @@ defmodule SauronReporter.Analytics do
 
   **Who is signed in.** The plug and the hook read the assign
   `:sauron_user_id` (any term: `to_string/1` of it is hashed), else the
-  `user_assign`'s `id`. `user_id/1` hashes it with `user_key` —
+  `user_assign`'s `id` (`:current_user` unless configured, 0.6.0). `user_id/1` hashes it with `user_key` —
   HMAC-SHA256, 32 hex characters — before it leaves the app.
+
+  **Our own people are not counted (0.6.0).** A request or a socket is
+  *ours* — the app's own staff, Nutshell Lab's people for the fleet —
+  when the `user_assign`'s `email` (a string, or anything `to_string/1`
+  takes: `Ash.CiString`…) ends with one of `ignore_emails`, compared
+  without case (`"@nutshell-lab.com"`; an entry without `@` is a suffix
+  all the same), or when the app sets the assign `:sauron_ignore` to
+  `true` itself — for a user without an email, or a rule of its own.
+  Ours sends no page view and no custom event (`track/3` answers `:ok`
+  and sends nothing); its timings still go, server performance is not
+  about who.
+
+  Signed out, ours is still ours: the plug answers an ours request with
+  the cookie `sauron_ignore=1` (a year, `/`, `HttpOnly`, `SameSite=Lax`,
+  `Secure` over https; no identifier in it), and any request carrying it
+  is ours. The hook learns it from the session: see
+  `SauronReporter.Analytics.Plug`.
 
   **The visitor's IP.** `conn.remote_ip`, as the app's own proxy
   handling sets it (`RemoteIp`, `Plug.RewriteOn`…). `trust_forwarded:
@@ -64,7 +82,10 @@ defmodule SauronReporter.Analytics do
 
   # Sauron's own test (`Sauron.Analytics.UserAgent`), so a bot here is a
   # bot there.
-  @bot ~r/bot|spider|crawl|slurp|ia_archiver|headless|phantom|selenium|puppeteer|fetch|curl|wget|python|go-http-client|okhttp|httpx|libcurl|scrapy|aiohttp|axios|java\/|httpclient|postman/i
+  @bot ~r/bot|spider|crawl|slurp|ia_archiver|headless|phantom|selenium|puppeteer|fetch|curl|wget|python|go-http-client|okhttp|httpx|libcurl|scrapy|aiohttp|axios|java\/|httpclient|postman|sauron\/|uptime|pingdom|statuscake|betterstack|better stack|checkly|hetrix|site24x7|nagios|zabbix|monitor/i
+
+  # The "don't count me" cookie and its session twin (0.6.0).
+  @ignore_cookie "sauron_ignore"
 
   @utm ~w(utm_source utm_medium utm_campaign utm_term utm_content)
   @max_props 10
@@ -108,10 +129,10 @@ defmodule SauronReporter.Analytics do
       `:user_id` (hashed here) or `:user` (already hashed). Without `:ip`
       and `:ua`, the event has no visitor.
 
-  Always `:ok`.
+  Always `:ok`; nothing is sent from a conn or a socket that is ours.
   """
   def track(where, name, props \\ %{}) do
-    if enabled?() do
+    if enabled?() and not ours?(where) do
       where
       |> context()
       |> Map.merge(%{
@@ -147,6 +168,66 @@ defmodule SauronReporter.Analytics do
     end
   rescue
     _ -> nil
+  end
+
+  @doc """
+  Whether a conn or a socket is ours — the app's own people, never
+  counted: the assign `:sauron_ignore`, the `user_assign`'s email under
+  `ignore_emails`, the cookie `sauron_ignore` (a conn), the session flag
+  the hook read (a socket). `false` for anything else.
+  """
+  def ours?(%{__struct__: Plug.Conn} = conn) do
+    ours_assigns?(conn.assigns) or ignore_cookie?(conn)
+  end
+
+  def ours?(%{__struct__: Phoenix.LiveView.Socket} = socket) do
+    ours_assigns?(socket.assigns) or SauronReporter.Analytics.Hook.ours_session?(socket)
+  end
+
+  def ours?(_where), do: false
+
+  @doc false
+  # The rule on a conn's or a socket's assigns: `:sauron_ignore` set by
+  # the app, or the signed-in user's email under `ignore_emails`.
+  def ours_assigns?(assigns) do
+    assigns[:sauron_ignore] == true or
+      case assigns[setting(:user_assign, :current_user)] do
+        %{email: email} when not is_nil(email) -> ignored_email?(email)
+        _ -> false
+      end
+  rescue
+    _ -> false
+  end
+
+  @doc "Whether an email ends with one of `ignore_emails`, without case."
+  def ignored_email?(email) do
+    email = email |> to_string() |> String.trim() |> String.downcase()
+
+    email != "" and
+      Enum.any?(List.wrap(setting(:ignore_emails, [])), fn suffix ->
+        suffix = suffix |> to_string() |> String.trim() |> String.downcase()
+        suffix != "" and String.ends_with?(email, suffix)
+      end)
+  rescue
+    _ -> false
+  end
+
+  @doc false
+  def ignore_cookie, do: @ignore_cookie
+
+  @doc false
+  # The cookie, fetched here when the conn has not parsed its cookies yet
+  # (the fetched conn is not kept: only the plug changes the conn).
+  def ignore_cookie?(conn) do
+    cookies =
+      case conn.req_cookies do
+        %Plug.Conn.Unfetched{} -> Plug.Conn.fetch_cookies(conn).req_cookies
+        cookies -> cookies
+      end
+
+    filled?(cookies[@ignore_cookie])
+  rescue
+    _ -> false
   end
 
   @doc "Whether a user agent names a crawler or a script — Sauron's own test."
@@ -238,7 +319,7 @@ defmodule SauronReporter.Analytics do
     id =
       case assigns[:sauron_user_id] do
         nil ->
-          case setting(:user_assign) && assigns[setting(:user_assign)] do
+          case assigns[setting(:user_assign, :current_user)] do
             %{id: id} -> id
             _ -> nil
           end

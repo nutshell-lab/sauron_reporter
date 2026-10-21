@@ -17,7 +17,7 @@ IPs, headers or job arguments.
 
 ```elixir
 # mix.exs
-{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.5.0"}
+{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.6.0"}
 ```
 
 ErrorTracker is configured by the app (its repo is the local buffer):
@@ -64,7 +64,8 @@ config :sauron_reporter,
   analytics: [
     enabled: System.get_env("SAURON_ANALYTICS") in ~w(1 true),
     user_key: System.get_env("SAURON_USER_KEY"), # optional: no key, no `user` sent
-    sites: ["www.example.fr"]                    # optional allowlist of hosts
+    sites: ["www.example.fr"],                   # optional allowlist of hosts
+    ignore_emails: ["@nutshell-lab.com"]         # optional: our people are not counted (0.6.0)
   ]
 ```
 
@@ -95,7 +96,8 @@ SauronReporter.Analytics.track(conn, "signup", %{plan: "pro"})
   :connected}`, for routes the plug does not count: the first page then
   counts when its live connection opens.
 - **The user**: the assign `:sauron_user_id`, else `user_assign:`'s
-  `id`, hashed with `user_key` (HMAC-SHA256, 32 hex) before it leaves.
+  `id` (`:current_user` by default), hashed with `user_key`
+  (HMAC-SHA256, 32 hex) before it leaves.
 - **The IP**: `conn.remote_ip` as the app's proxy handling sets it;
   `trust_forwarded: true` reads the last `X-Forwarded-For` hop instead
   (`:first`, the first, behind proxies the app trusts entirely).
@@ -107,6 +109,60 @@ SauronReporter.Analytics.track(conn, "signup", %{plan: "pro"})
   :dropped | :failed]` count it all.
 
 Every option is in `SauronReporter.Analytics`'s moduledoc.
+
+## Our own people are not counted (0.6.0)
+
+An app never reports its own staff — for the fleet, Nutshell Lab's
+people — to Sauron's analytics. A request or a socket is *ours* when:
+
+- the signed-in user (`user_assign:`, `:current_user` by default) has
+  an `email` — a string, or anything `to_string/1` takes, like
+  `Ash.CiString` — ending with one of `ignore_emails`, without case
+  (`"@nutshell-lab.com"`; an entry without `@` is a suffix all the same;
+  default `[]`, nobody);
+- the app assigns `:sauron_ignore` to `true` itself — the way out for a
+  user without an email, or a rule of the app's own
+  (`assign(conn, :sauron_ignore, true)` in a plug, the same on the
+  socket in an `on_mount`);
+- the request carries the cookie `sauron_ignore`.
+
+Ours sends no page view and no custom event (`track/3` answers `:ok` and
+sends nothing). Its timings still go: server performance is not about
+who.
+
+**The cookie.** The plug answers an ours signed-in request (or one the
+app flagged) with `sauron_ignore=1`: a year, path `/`, `HttpOnly`,
+`SameSite=Lax`, `Secure` over https, no identifier in it. Any later
+request carrying it is ours, signed in or not — so a person of the app
+browsing its public pages signed out stays left out. Its name is fixed.
+The plug reads cookies itself; it needs no session for that.
+
+**Live navigations.** The hook leaves out a signed-in user by the
+socket's assigns (the app's hook assigning the user comes first, as
+already required). A signed-out person with the cookie it learns from
+the session — a connected mount reads no cookie, but its session is the
+page's, merged with the session cookie the socket reads (`session:
+@session_options` in `connect_info`). The plug puts `"sauron_ignore" =>
+true` in the session when it finds a request ours **and the session is
+already fetched** — it never fetches it. So for that case the plug must
+run after `fetch_session`:
+
+```elixir
+# endpoint.ex — timings for every request
+plug SauronReporter.Analytics.Plug, page_views: false
+
+# router.ex — page views, once the session is fetched
+pipeline :browser do
+  plug :fetch_session
+  # ...
+  plug SauronReporter.Analytics.Plug, timings: false
+end
+```
+
+(or `plug :fetch_session` right before the plug in the endpoint).
+Without it, everything else holds — ours by the user, by the assign, by
+the cookie on every HTTP request — but a signed-out person's live
+navigations are counted.
 
 ## What the client caused is not reported (0.4.0)
 

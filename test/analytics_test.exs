@@ -141,6 +141,93 @@ defmodule SauronReporter.AnalyticsTest do
     end
   end
 
+  describe "ours (0.6.0)" do
+    setup do
+      configure_analytics(ignore_emails: ["@nutshell-lab.com", "Staff.Example.fr"])
+    end
+
+    test "an email under ignore_emails, without case; an entry without @ is a suffix too" do
+      assert Analytics.ignored_email?("nathan@nutshell-lab.com")
+      assert Analytics.ignored_email?("  Nathan@NUTSHELL-LAB.COM ")
+      assert Analytics.ignored_email?("ops@staff.example.fr")
+
+      assert Analytics.ignored_email?(%SauronReporter.Test.CiString{
+               value: "A@Nutshell-Lab.com"
+             })
+
+      refute Analytics.ignored_email?("nathan@nutshell-lab.com.evil.fr")
+      refute Analytics.ignored_email?("client@example.fr")
+      refute Analytics.ignored_email?("")
+      refute Analytics.ignored_email?(%{not: "text"})
+
+      configure_analytics([])
+      refute Analytics.ignored_email?("nathan@nutshell-lab.com"), "default: nobody"
+    end
+
+    test "the rule on assigns: the user_assign's email (default :current_user), or :sauron_ignore" do
+      assert Analytics.ours_assigns?(%{current_user: %{id: 1, email: "x@nutshell-lab.com"}})
+      refute Analytics.ours_assigns?(%{current_user: %{id: 1, email: "x@example.fr"}})
+      refute Analytics.ours_assigns?(%{current_user: %{id: 1}})
+      refute Analytics.ours_assigns?(%{current_user: %{id: 1, email: nil}})
+      refute Analytics.ours_assigns?(%{})
+      assert Analytics.ours_assigns?(%{sauron_ignore: true, current_user: %{id: 1}})
+      refute Analytics.ours_assigns?(%{sauron_ignore: "yes"})
+
+      configure_analytics(ignore_emails: ["@nutshell-lab.com"], user_assign: :admin)
+      assert Analytics.ours_assigns?(%{admin: %{email: "x@nutshell-lab.com"}})
+      refute Analytics.ours_assigns?(%{current_user: %{email: "x@nutshell-lab.com"}})
+    end
+
+    test "track/3 from an ours conn: :ok, nothing sent — by email, by assign, by cookie" do
+      conn =
+        Plug.Test.conn(:post, "https://www.example.fr/contact")
+        |> Plug.Conn.put_req_header("user-agent", "Mozilla/5.0")
+
+      staff = Plug.Conn.assign(conn, :current_user, %{id: 3, email: "n@nutshell-lab.com"})
+      flagged = Plug.Conn.assign(conn, :sauron_ignore, true)
+      cookie = Plug.Conn.put_req_header(conn, "cookie", "sauron_ignore=1")
+
+      for ours <- [staff, flagged, cookie] do
+        assert Analytics.ours?(ours)
+        assert :ok = Analytics.track(ours, "contact")
+      end
+
+      refute Analytics.ours?(conn)
+      Analytics.track(conn, "kept")
+      assert [%{"name" => "kept"}] = flushed_events()
+    end
+
+    test "a map is never ours" do
+      refute Analytics.ours?(%{site: "www.example.fr", sauron_ignore: true})
+    end
+  end
+
+  describe "bot?/1" do
+    test "Sauron's own test, monitors included" do
+      for ua <- [
+            "Mozilla/5.0 (compatible; Googlebot/2.1)",
+            "curl/8.0",
+            "Sauron/1.0 (+https://sauron.nutshell-lab.com)",
+            "Mozilla/5.0 (compatible; UptimeRobot/2.0)",
+            "Pingdom.com_bot_version_1.4",
+            "Mozilla/5.0 (compatible; StatusCake)",
+            "Better Stack Better Uptime Bot",
+            "Checkly/1.0",
+            "HetrixTools Uptime Monitoring Bot",
+            "Site24x7",
+            "check_http/v2.3 (nagios-plugins 2.3)",
+            "Zabbix"
+          ],
+          do: assert(Analytics.bot?(ua), ua)
+
+      refute Analytics.bot?(
+               "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148 Safari/604.1"
+             )
+
+      refute Analytics.bot?(nil)
+    end
+  end
+
   describe "the buffer" do
     test "sends as soon as batch_size events wait" do
       configure_analytics(batch_size: 3)

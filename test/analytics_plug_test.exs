@@ -24,6 +24,15 @@ defmodule SauronReporter.AnalyticsPlugTest.Router do
     plug(:assign_user)
   end
 
+  pipeline :staff do
+    plug(:assign_staff)
+  end
+
+  scope "/staff" do
+    pipe_through(:staff)
+    get("/:id", Page, :html)
+  end
+
   scope "/" do
     pipe_through(:signed_in)
     get("/offres/:id", Page, :html)
@@ -37,6 +46,9 @@ defmodule SauronReporter.AnalyticsPlugTest.Router do
 
   # Assigned downstream of the analytics plug: read when the response leaves.
   def assign_user(conn, _opts), do: Plug.Conn.assign(conn, :current_user, %{id: 12})
+
+  def assign_staff(conn, _opts),
+    do: Plug.Conn.assign(conn, :current_user, %{id: 3, email: "Nathan@Nutshell-Lab.com"})
 end
 
 defmodule SauronReporter.AnalyticsPlugTest do
@@ -62,6 +74,14 @@ defmodule SauronReporter.AnalyticsPlugTest do
       Enum.reduce(Keyword.get(opts, :headers, []), conn, fn {k, v}, c ->
         put_req_header(c, k, v)
       end)
+
+    conn =
+      case Keyword.fetch(opts, :session) do
+        {:ok, session} -> Plug.Test.init_test_session(conn, session)
+        :error -> conn
+      end
+
+    conn = Enum.reduce(Keyword.get(opts, :assigns, []), conn, fn {k, v}, c -> assign(c, k, v) end)
 
     conn
     |> SauronReporter.Analytics.Plug.call(
@@ -202,5 +222,90 @@ defmodule SauronReporter.AnalyticsPlugTest do
     configure_analytics(sites: ["www.example.fr"])
     request(:get, "https://vm-cms.internal/offres/1")
     assert events() == []
+  end
+
+  describe "ours (0.6.0)" do
+    setup do
+      configure_analytics(ignore_emails: ["@nutshell-lab.com"])
+    end
+
+    test "a signed-in user under ignore_emails, without case: timed, no page view, the cookie set" do
+      conn = request(:get, "https://www.example.fr/staff/1")
+
+      assert [%{"kind" => "timing", "status" => 200}] = events()
+
+      assert conn.resp_cookies["sauron_ignore"] == %{
+               value: "1",
+               max_age: 31_536_000,
+               path: "/",
+               http_only: true,
+               same_site: "Lax",
+               secure: true
+             }
+
+      [set_cookie] = get_resp_header(conn, "set-cookie")
+      assert set_cookie =~ ~r/^sauron_ignore=1;/
+
+      for part <- ~w(path=/ max-age=31536000 HttpOnly secure SameSite=Lax),
+          do: assert(set_cookie =~ part)
+    end
+
+    test "the cookie is Secure only over https" do
+      conn = request(:get, "http://www.example.fr/staff/1")
+      assert %{secure: false} = conn.resp_cookies["sauron_ignore"]
+      refute hd(get_resp_header(conn, "set-cookie")) =~ "secure"
+    end
+
+    test "the assign :sauron_ignore, the app's own word: no page view, the cookie set" do
+      configure_analytics([])
+      conn = request(:get, "https://www.example.fr/offres/1", assigns: [sauron_ignore: true])
+
+      assert kinds(events()) == ["timing"]
+      assert %{value: "1"} = conn.resp_cookies["sauron_ignore"]
+    end
+
+    test "the cookie alone, signed out: no page view, the timing still; not set again" do
+      conn =
+        request(:get, "https://www.example.fr/offres/1",
+          headers: [{"cookie", "theme=dark; sauron_ignore=1"}]
+        )
+
+      assert [%{"kind" => "timing", "route" => "/offres/:id"}] = events()
+      refute Map.has_key?(conn.resp_cookies, "sauron_ignore")
+    end
+
+    test "not ours: a page view, and no cookie" do
+      conn = request(:get, "https://www.example.fr/offres/1")
+      assert kinds(events()) == ["timing", "page_view"]
+      assert get_resp_header(conn, "set-cookie") == []
+
+      configure_analytics(ignore_emails: ["@other.fr", ""])
+      conn = request(:get, "https://www.example.fr/staff/1")
+      assert kinds(events()) == ["timing", "page_view"]
+      assert get_resp_header(conn, "set-cookie") == []
+
+      configure_analytics([])
+      request(:get, "https://www.example.fr/staff/1", headers: [{"cookie", "sauron_ignore="}])
+      assert kinds(events()) == ["timing", "page_view"]
+    end
+
+    test "a fetched session gets the flag for the hook; an unfetched one is left alone" do
+      cookie = [{"cookie", "sauron_ignore=1"}]
+
+      conn = request(:get, "https://www.example.fr/offres/1", headers: cookie, session: %{})
+      assert get_session(conn, "sauron_ignore") == true
+
+      # Fetched before the plug, the session takes a signed-in user's flag too.
+      conn = request(:get, "https://www.example.fr/staff/1", session: %{"user_token" => "t"})
+      assert get_session(conn, "sauron_ignore") == true
+      assert get_session(conn, "user_token") == "t"
+
+      conn = request(:get, "https://www.example.fr/offres/1", headers: cookie)
+      refute Map.has_key?(conn.private, :plug_session)
+      assert conn.status == 200
+
+      conn = request(:get, "https://www.example.fr/offres/1", session: %{})
+      assert get_session(conn, "sauron_ignore") == nil
+    end
   end
 end

@@ -4,8 +4,9 @@ defmodule SauronReporter.MixProject do
   def project do
     [
       app: :sauron_reporter,
-      version: "0.5.0",
+      version: "0.6.0",
       elixir: "~> 1.18",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description:
@@ -20,6 +21,10 @@ defmodule SauronReporter.MixProject do
       mod: {SauronReporter.Application, []}
     ]
   end
+
+  # Test structs compiled before protocols consolidate (a String.Chars email).
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
     [

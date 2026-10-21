@@ -22,6 +22,27 @@ defmodule SauronReporter.Analytics.Plug do
       # proxy handling that sets remote_ip:
       plug SauronReporter.Analytics.Plug
 
+  **Ours (0.6.0).** A request that is ours (see `SauronReporter.Analytics`:
+  the `user_assign`'s email under `ignore_emails`, or the assign
+  `:sauron_ignore`) is timed, never a page view, and its response sets
+  the cookie `sauron_ignore=1` — a year, path `/`, `HttpOnly`,
+  `SameSite=Lax`, `Secure` over https, no identifier in it. A request
+  carrying that cookie is ours too, signed in or not, so a person of the
+  app signed out on its public pages stays left out. The plug reads the
+  cookies itself: no session, no pipeline needed for that. The cookie's
+  name is fixed.
+
+  The LiveView hook cannot read a cookie on its connected mount; it reads
+  the session. So when this plug finds a request ours and the session is
+  already fetched, it puts `"sauron_ignore" => true` in it — never
+  fetching the session itself. For the hook to leave out a signed-out
+  person of the app, the session must be fetched before this plug: put
+  it after `:fetch_session` — in the `:browser` pipeline (`timings:
+  false` there, `page_views: false` in the endpoint), or behind `plug
+  :fetch_session` in the endpoint. Otherwise only their live navigations
+  are counted; a signed-in user is always left out (the hook reads the
+  assigns).
+
   Options: `page_views: false` or `timings: false` keep one of the two —
   a timing plug in the endpoint and a page-view plug in the pipeline of
   the public pages, say — and `trust_forwarded` (see
@@ -42,7 +63,11 @@ defmodule SauronReporter.Analytics.Plug do
   def call(conn, opts) do
     if Analytics.enabled?() and not Analytics.ignored_path?(conn.request_path) do
       started = System.monotonic_time()
-      register_before_send(conn, &before_send(&1, started, opts))
+      conn = fetch_cookies(conn)
+
+      conn
+      |> mark_session(Analytics.ours?(conn))
+      |> register_before_send(&before_send(&1, started, opts))
     else
       conn
     end
@@ -58,6 +83,8 @@ defmodule SauronReporter.Analytics.Plug do
 
     context = context(conn, opts)
     route = route(conn)
+    ours_assigns? = Analytics.ours_assigns?(conn.assigns)
+    ours? = ours_assigns? or Analytics.ignore_cookie?(conn)
 
     if Keyword.get(opts, :timings, true) do
       Analytics.push(
@@ -71,7 +98,7 @@ defmodule SauronReporter.Analytics.Plug do
       )
     end
 
-    if Keyword.get(opts, :page_views, true) and page_view?(conn, context) do
+    if Keyword.get(opts, :page_views, true) and not ours? and page_view?(conn, context) do
       Analytics.push(
         context
         |> Map.merge(%{"kind" => "page_view", "route" => route})
@@ -80,11 +107,42 @@ defmodule SauronReporter.Analytics.Plug do
     end
 
     conn
+    |> put_ignore_cookie(ours_assigns?)
+    |> mark_session(ours?)
   rescue
     exception ->
       Analytics.debug(exception)
       conn
   end
+
+  # Signed in as ours, or ours by the app's word: the cookie that keeps
+  # them left out once signed out.
+  defp put_ignore_cookie(conn, true) do
+    put_resp_cookie(conn, Analytics.ignore_cookie(), "1",
+      max_age: 365 * 24 * 60 * 60,
+      path: "/",
+      http_only: true,
+      same_site: "Lax",
+      secure: conn.scheme == :https
+    )
+  end
+
+  defp put_ignore_cookie(conn, _ours?), do: conn
+
+  # The hook's way to know: the session, when the app fetched it already.
+  # Written only when it changes, so the session cookie is not rewritten
+  # on every response. In before_send it lasts only if the session was
+  # fetched before this plug (Plug.Session writes its cookie in a
+  # before_send of its own, run after this one then).
+  defp mark_session(%{private: %{plug_session_fetch: :done}} = conn, true) do
+    if get_session(conn, Analytics.ignore_cookie()) == true,
+      do: conn,
+      else: put_session(conn, Analytics.ignore_cookie(), true)
+  rescue
+    _ -> conn
+  end
+
+  defp mark_session(conn, _ours?), do: conn
 
   @doc false
   # The request's visitor fields, as `track/3` from a conn sends them.

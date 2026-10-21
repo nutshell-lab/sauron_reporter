@@ -20,12 +20,31 @@ defmodule SauronReporter.AnalyticsHookTest.Router do
     plug(:fetch_session)
   end
 
+  # The plug after the session is fetched: it can flag it for the hook.
+  pipeline :counted do
+    plug(:fetch_session)
+    plug(SauronReporter.Analytics.Plug, timings: false)
+  end
+
+  scope "/counted" do
+    pipe_through(:counted)
+
+    live_session :counted, on_mount: [SauronReporter.Analytics.Hook] do
+      live("/:id", SauronReporter.AnalyticsHookTest.Live)
+    end
+  end
+
   scope "/" do
     pipe_through(:browser)
 
     live_session :public,
       on_mount: [__MODULE__, SauronReporter.Analytics.Hook] do
       live("/pages/:id", SauronReporter.AnalyticsHookTest.Live)
+    end
+
+    live_session :staff,
+      on_mount: [{__MODULE__, :staff}, SauronReporter.Analytics.Hook] do
+      live("/staff/:id", SauronReporter.AnalyticsHookTest.Live)
     end
 
     live_session :connected,
@@ -37,6 +56,11 @@ defmodule SauronReporter.AnalyticsHookTest.Router do
   # The app's own hook, before ours: who is signed in.
   def on_mount(:default, _params, _session, socket),
     do: {:cont, Phoenix.Component.assign(socket, :sauron_user_id, 5)}
+
+  def on_mount(:staff, _params, _session, socket),
+    do:
+      {:cont,
+       Phoenix.Component.assign(socket, :current_user, %{id: 3, email: "nathan@NUTSHELL-lab.com"})}
 end
 
 defmodule SauronReporter.AnalyticsHookTest.Endpoint do
@@ -165,5 +189,61 @@ defmodule SauronReporter.AnalyticsHookTest do
     {:ok, view, _html} = live(browser(), "/pages/a")
     render_patch(view, "/pages/b")
     assert events() == []
+  end
+
+  describe "ours (0.6.0)" do
+    setup do
+      configure_analytics(ignore_emails: ["@nutshell-lab.com"])
+    end
+
+    test "signed in, by the socket's assigns: no live page view, no event" do
+      {:ok, view, _html} = live(browser(), "/staff/a")
+      render_patch(view, "/staff/b")
+      render_click(view, "signup")
+      assert events() == []
+
+      conn = put_connect_params(browser(), %{"_live_referer" => "https://www.google.com/"})
+      {:ok, _view, _html} = live(conn, "/staff/c")
+      assert events() == []
+    end
+
+    test "signed out, by the session's flag: no live page view, no event" do
+      conn = Plug.Test.init_test_session(browser(), %{"sauron_ignore" => true})
+
+      {:ok, view, _html} = live(conn, "/pages/a")
+      render_patch(view, "/pages/b")
+      render_click(view, "signup")
+      assert events() == []
+
+      conn = put_connect_params(conn, %{"_live_referer" => "https://www.google.com/"})
+      {:ok, _view, _html} = live(conn, "/pages/c")
+      assert events() == []
+    end
+
+    test "the cookie, through the plug after fetch_session, reaches the hook" do
+      conn = Phoenix.ConnTest.put_req_cookie(browser(), "sauron_ignore", "1")
+      {:ok, view, _html} = live(conn, "/counted/a")
+      render_patch(view, "/counted/b")
+      assert events() == []
+
+      # Without it, the plug's first page and the hook's patch.
+      {:ok, view, _html} = live(browser(), "/counted/a")
+      render_patch(view, "/counted/b")
+
+      assert [%{"path" => "/counted/a"}, %{"path" => "/counted/b"}] =
+               Enum.filter(events(), &(&1["kind"] == "page_view"))
+    end
+
+    test "a session without the flag, a user not under ignore_emails: counted as before" do
+      conn = Plug.Test.init_test_session(browser(), %{"sauron_ignore" => "no"})
+      {:ok, view, _html} = live(conn, "/pages/a")
+      render_patch(view, "/pages/b")
+      assert [%{"kind" => "page_view", "path" => "/pages/b"}] = events()
+
+      configure_analytics(ignore_emails: ["@other.fr"])
+      {:ok, view, _html} = live(browser(), "/staff/a")
+      render_patch(view, "/staff/b")
+      assert [%{"kind" => "page_view", "path" => "/staff/b"}] = events()
+    end
   end
 end

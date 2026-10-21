@@ -37,6 +37,17 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
           websocket: [connect_info: [:peer_data, :user_agent, :x_headers, session: @session_options]],
           longpoll: [connect_info: [:peer_data, :user_agent, :x_headers, session: @session_options]]
 
+    **Ours (0.6.0)** is never counted, nor `track/3`ed (see
+    `SauronReporter.Analytics`): a signed-in user by the socket's assigns
+    — the `user_assign`'s email under `ignore_emails`, or `:sauron_ignore`
+    — read when each page view is decided; a signed-out person of the app
+    by the session's `"sauron_ignore"`, which `SauronReporter.Analytics.Plug`
+    puts there for a request carrying its cookie, when the session is
+    fetched before it. A connected mount reads no cookie, but its session
+    is the page's signed session merged with the session cookie the
+    socket read (`session: @session_options` in `connect_info`): the flag
+    reaches the hook through either.
+
     `:x_headers` only matters with `trust_forwarded`; without it the IP is
     the socket's peer. A crawler's socket is not tracked (`send_bots:
     true` tracks it). `SauronReporter.Analytics.track(socket, name, props)`
@@ -49,17 +60,20 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     @private :sauron_analytics
 
-    def on_mount(arg, _params, _session, socket) do
+    def on_mount(arg, _params, session, socket) do
       opts = if is_list(arg), do: arg, else: []
+      ours? = is_map(session) and session[Analytics.ignore_cookie()] == true
 
       with true <- Analytics.enabled?(),
            true <- connected?(socket),
            %{} = context <- build_context(socket, opts) do
         {:cont,
          socket
-         |> put_private(@private, context)
+         |> put_private(@private, Map.put(context, :ours?, ours?))
          |> attach_hook(@private, :handle_params, &handle_params/3)}
       else
+        # Not tracked, but track/3 from this socket must know.
+        _ when ours? -> {:cont, put_private(socket, @private, %{ours?: true})}
         _ -> {:cont, socket}
       end
     rescue
@@ -102,7 +116,14 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         {:cont, socket}
     end
 
+    # Ours: by the session at mount, or by the assigns now.
     defp record(socket, context, uri, referrer) do
+      if context.ours? or Analytics.ours_assigns?(socket.assigns),
+        do: :ours,
+        else: push(socket, context, uri, referrer)
+    end
+
+    defp push(socket, context, uri, referrer) do
       Analytics.push(
         %{
           "kind" => "page_view",
@@ -117,6 +138,10 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
         |> Map.merge(Analytics.utm(uri.query))
       )
     end
+
+    @doc false
+    # Whether the session said ours at mount, for `track/3` from a socket.
+    def ours_session?(socket), do: match?(%{ours?: true}, socket.private[@private])
 
     @doc false
     # The page this hook last saw, for `track/3` from a socket.
