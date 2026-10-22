@@ -332,32 +332,6 @@ defmodule SauronReporter.AnalyticsTest do
     end
   end
 
-  describe "bot?/1" do
-    test "Sauron's own test, monitors included" do
-      for ua <- [
-            "Mozilla/5.0 (compatible; Googlebot/2.1)",
-            "curl/8.0",
-            "Sauron/1.0 (+https://sauron.nutshell-lab.com)",
-            "Mozilla/5.0 (compatible; UptimeRobot/2.0)",
-            "Pingdom.com_bot_version_1.4",
-            "Mozilla/5.0 (compatible; StatusCake)",
-            "Better Stack Better Uptime Bot",
-            "Checkly/1.0",
-            "HetrixTools Uptime Monitoring Bot",
-            "Site24x7",
-            "check_http/v2.3 (nagios-plugins 2.3)",
-            "Zabbix"
-          ],
-          do: assert(Analytics.bot?(ua), ua)
-
-      refute Analytics.bot?(
-               "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148 Safari/604.1"
-             )
-
-      refute Analytics.bot?(nil)
-    end
-  end
-
   describe "the buffer" do
     test "sends as soon as batch_size events wait" do
       configure_analytics(batch_size: 3)

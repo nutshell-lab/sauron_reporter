@@ -1,8 +1,8 @@
 defmodule SauronReporter.Analytics do
   @moduledoc """
   An app's visits, custom events and server timings sent to Sauron
-  (sauron's plan 28), beside whatever analytics the app keeps of its
-  own. Cookieless: the app forwards each visitor's IP and user agent,
+  (sauron's plans 28 and 32), beside whatever analytics the app keeps
+  of its own. Cookieless: the app forwards each visitor's IP and user agent,
   Sauron hashes them with a salt of the day and keeps neither.
 
   Opt-in, on top of the reporter's `url`, `token` and `app`:
@@ -22,7 +22,6 @@ defmodule SauronReporter.Analytics do
           ignore_paths: ["/metrics"],# more paths never reported (prefixes, by segment)
           redact_paths: [],          # ["/annuler/:token"]: secret-bearing routes, sent as their pattern
           mask_tokens: true,         # false: token-shaped segments sent as they are
-          send_bots: false,          # true sends crawlers' page views too
           flush_every: 5_000,        # ms between two sends
           batch_size: 50,            # a send as soon as this many wait
           max_buffer: 5_000,         # beyond, the oldest are dropped and counted
@@ -32,13 +31,22 @@ defmodule SauronReporter.Analytics do
 
   The pieces:
 
-    * `SauronReporter.Analytics.Plug` — a page view per HTML page served
-      and a timing per request;
-    * `SauronReporter.Analytics.Hook` — a page view per live navigation;
+    * `SauronReporter.Analytics.Plug` — a page request per HTML page
+      served and a timing per request;
+    * `SauronReporter.Analytics.Hook` — a page view when a page's live
+      connection opens and per live navigation;
     * `track/3` — a custom event, from a conn, a socket or a map;
     * `SauronReporter.Analytics.Buffer` — holds the events and sends
       them in batches; runs in this library's application, inert while
       analytics is not enabled.
+
+  **People and robots (0.7.0, plan 32).** A page served is a
+  `page_request`, whoever asked for it; a `page_view` is a person's —
+  sent by the hook once the page's live connection proves a browser ran
+  it, with the request's path, IP and user agent, so Sauron pairs the
+  two. A dead page (no LiveView) is a request only. Robots are sent like
+  anyone: Sauron names them and sorts them, by their user agent, their
+  network and the requests no page view confirmed.
 
   **Who is signed in.** The plug and the hook read the assign
   `:sauron_user_id` (any term: `to_string/1` of it is hashed), else the
@@ -52,9 +60,9 @@ defmodule SauronReporter.Analytics do
   without case (`"@nutshell-lab.com"`; an entry without `@` is a suffix
   all the same), or when the app sets the assign `:sauron_ignore` to
   `true` itself — for a user without an email, or a rule of its own.
-  Ours sends no page view and no custom event (`track/3` answers `:ok`
-  and sends nothing); its timings still go, server performance is not
-  about who.
+  Ours sends no page request, no page view and no custom event
+  (`track/3` answers `:ok` and sends nothing); its timings still go,
+  server performance is not about who.
 
   **Paths carry no secret (0.6.1).** A path leaves the app without its
   query or fragment, and without the secrets a route puts in its
@@ -108,10 +116,6 @@ defmodule SauronReporter.Analytics do
   """
 
   alias SauronReporter.Analytics.Buffer
-
-  # Sauron's own test (`Sauron.Analytics.UserAgent`), so a bot here is a
-  # bot there.
-  @bot ~r/bot|spider|crawl|slurp|ia_archiver|headless|phantom|selenium|puppeteer|fetch|curl|wget|python|go-http-client|okhttp|httpx|libcurl|scrapy|aiohttp|axios|java\/|httpclient|postman|sauron\/|uptime|pingdom|statuscake|betterstack|better stack|checkly|hetrix|site24x7|nagios|zabbix|monitor/i
 
   # The "don't count me" cookie and its session twin (0.6.0).
   @ignore_cookie "sauron_ignore"
@@ -267,11 +271,6 @@ defmodule SauronReporter.Analytics do
   rescue
     _ -> false
   end
-
-  @doc "Whether a user agent names a crawler or a script — Sauron's own test."
-  def bot?(nil), do: false
-  def bot?(ua) when is_binary(ua), do: Regex.match?(@bot, ua)
-  def bot?(_), do: false
 
   @doc "The paths never reported: the defaults, then the app's `ignore_paths`."
   def ignored_path?(path) when is_binary(path) do

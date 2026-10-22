@@ -67,7 +67,7 @@ defmodule SauronReporter.AnalyticsContractTest do
     %{"events" => decoded} = Jason.decode!(body)
     assert length(decoded) <= 500
 
-    assert decoded |> Enum.map(& &1["kind"]) |> Enum.sort() == ~w(event event page_view timing)
+    assert decoded |> Enum.map(& &1["kind"]) |> Enum.sort() == ~w(event event page_request timing)
 
     now = DateTime.utc_now()
     for event <- decoded, do: assert_contract(event, now)
@@ -83,7 +83,7 @@ defmodule SauronReporter.AnalyticsContractTest do
       if is_binary(value), do: assert(String.trim(value) == value, "#{key} is not trimmed")
     end
 
-    assert event["kind"] in ~w(page_view event timing)
+    assert event["kind"] in ~w(page_request page_view event timing)
 
     assert {:ok, at, _offset} = DateTime.from_iso8601(event["at"])
     assert DateTime.diff(at, now) >= -48 * 3600 and DateTime.diff(at, now) <= 5 * 60
@@ -92,7 +92,7 @@ defmodule SauronReporter.AnalyticsContractTest do
     assert String.length(event["site"]) <= 253
 
     case event["kind"] do
-      "page_view" -> assert is_binary(event["path"])
+      kind when kind in ~w(page_request page_view) -> assert is_binary(event["path"])
       "event" -> assert is_binary(event["name"])
       "timing" -> assert is_number(event["duration_ms"])
     end

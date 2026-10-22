@@ -111,9 +111,23 @@ defmodule SauronReporter.AnalyticsHookTest do
     end
   end
 
-  test "the first page is the plug's; a patch to another path is a page view" do
-    {:ok, view, _html} = live(browser(), "/pages/a")
-    assert events() == []
+  test "the page counts when its live connection opens; a patch to another path too" do
+    {:ok, view, _html} = live(browser(), "/pages/a?utm_campaign=octobre")
+
+    assert [
+             %{
+               "kind" => "page_view",
+               "site" => "www.example.com",
+               "path" => "/pages/a",
+               "route" => "/pages/:id",
+               "utm_campaign" => "octobre",
+               "ip" => "127.0.0.1",
+               "ua" => @browser
+             } = first
+           ] = events()
+
+    # The request's referrer is not on the socket: the page_request has it.
+    refute Map.has_key?(first, "referrer")
 
     render_patch(view, "/pages/b?utm_source=newsletter&token=secret")
 
@@ -147,7 +161,7 @@ defmodule SauronReporter.AnalyticsHookTest do
              events()
   end
 
-  test "count: :connected — the first page counts when it connects" do
+  test "count: :connected, read before 0.7.0, changes nothing" do
     {:ok, view, _html} = live(browser(), "/app/a")
 
     assert [%{"kind" => "page_view", "path" => "/app/a", "route" => "/app/:id"} = first] =
@@ -161,8 +175,60 @@ defmodule SauronReporter.AnalyticsHookTest do
     # joins with `_mounts: 0`, so it is not exercised here.
   end
 
+  test "the disconnected mount — the HTTP render — sends nothing" do
+    conn = get(browser(), "/pages/a")
+    assert html_response(conn, 200) =~ "page"
+    assert events() == []
+  end
+
+  describe "pairing (0.7.0): the request and its page view" do
+    test "the plug's page_request and the hook's page_view: the same site, path, IP and user agent" do
+      configure_analytics(trust_forwarded: true)
+
+      conn =
+        browser()
+        |> Plug.Conn.put_req_header("x-forwarded-for", "198.51.100.1, 192.0.2.44")
+        |> Plug.Conn.put_req_header("referer", "https://www.google.com/search?q=x")
+
+      {:ok, _view, _html} = live(conn, "/counted/a1b2?utm_source=newsletter")
+
+      assert [
+               %{"kind" => "page_request", "status" => 200, "referrer" => "www.google.com"} =
+                 request,
+               %{"kind" => "page_view"} = page_view
+             ] = events()
+
+      pair = ~w(site path route ip ua utm_source)
+      assert Map.take(request, pair) == Map.take(page_view, pair)
+
+      assert %{"site" => "www.example.com", "path" => "/counted/a1b2", "ip" => "192.0.2.44"} =
+               page_view
+
+      assert page_view["ua"] == @browser
+    end
+
+    test "every X-Forwarded-For header, joined as the plug joins them" do
+      configure_analytics(trust_forwarded: :first)
+
+      conn =
+        browser()
+        |> Map.update!(:req_headers, fn headers ->
+          headers ++
+            [{"x-forwarded-for", "198.51.100.1"}, {"x-forwarded-for", "192.0.2.44"}]
+        end)
+
+      {:ok, _view, _html} = live(conn, "/counted/a")
+
+      assert [%{"kind" => "page_request", "ip" => ip}, %{"kind" => "page_view", "ip" => ip}] =
+               events()
+
+      assert ip == "198.51.100.1"
+    end
+  end
+
   test "track/3 from the socket: the page the hook last saw" do
     {:ok, view, _html} = live(browser(), "/pages/a")
+    assert [%{"kind" => "page_view"}] = events()
     render_click(view, "signup")
 
     assert [
@@ -178,10 +244,13 @@ defmodule SauronReporter.AnalyticsHookTest do
            ] = events()
   end
 
-  test "a crawler's socket is not tracked" do
-    {:ok, view, _html} = live(browser("Mozilla/5.0 (compatible; bingbot/2.0)"), "/pages/a")
+  test "a robot's socket is tracked like anyone's: Sauron sorts it (0.7.0)" do
+    robot = "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/120.0 Safari/537.36"
+    {:ok, view, _html} = live(browser(robot), "/pages/a")
     render_patch(view, "/pages/b")
-    assert events() == []
+
+    assert [%{"path" => "/pages/a", "ua" => ^robot}, %{"path" => "/pages/b", "ua" => ^robot}] =
+             events()
   end
 
   test "disabled: the hook stays out" do
@@ -195,6 +264,7 @@ defmodule SauronReporter.AnalyticsHookTest do
     test "ignore_paths: no live page view there, as the plug sends none" do
       configure_analytics(ignore_paths: ["/pages/hidden"])
       {:ok, view, _html} = live(browser(), "/pages/a")
+      assert [%{"path" => "/pages/a"}] = events()
       render_patch(view, "/pages/hidden")
       assert events() == []
 
@@ -215,6 +285,7 @@ defmodule SauronReporter.AnalyticsHookTest do
     test "a secret in the path: masked, or the app's pattern; track/3 alike" do
       token = "Xb3kQ9vN2mLp7RtY5wZc1HfJ8sDg4AeU"
       {:ok, view, _html} = live(browser(), "/pages/a")
+      assert [%{"path" => "/pages/a"}] = events()
       render_patch(view, "/pages/#{token}")
       render_click(view, "signup")
 
@@ -264,24 +335,27 @@ defmodule SauronReporter.AnalyticsHookTest do
       render_patch(view, "/counted/b")
       assert events() == []
 
-      # Without it, the plug's first page and the hook's patch.
+      # Without it, the plug's request, the hook's first page and its patch.
       {:ok, view, _html} = live(browser(), "/counted/a")
       render_patch(view, "/counted/b")
 
-      assert [%{"path" => "/counted/a"}, %{"path" => "/counted/b"}] =
-               Enum.filter(events(), &(&1["kind"] == "page_view"))
+      assert [
+               %{"kind" => "page_request", "path" => "/counted/a"},
+               %{"kind" => "page_view", "path" => "/counted/a"},
+               %{"kind" => "page_view", "path" => "/counted/b"}
+             ] = events()
     end
 
     test "a session without the flag, a user not under ignore_emails: counted as before" do
       conn = Plug.Test.init_test_session(browser(), %{"sauron_ignore" => "no"})
       {:ok, view, _html} = live(conn, "/pages/a")
       render_patch(view, "/pages/b")
-      assert [%{"kind" => "page_view", "path" => "/pages/b"}] = events()
+      assert [%{"path" => "/pages/a"}, %{"kind" => "page_view", "path" => "/pages/b"}] = events()
 
       configure_analytics(ignore_emails: ["@other.fr"])
       {:ok, view, _html} = live(browser(), "/staff/a")
       render_patch(view, "/staff/b")
-      assert [%{"kind" => "page_view", "path" => "/staff/b"}] = events()
+      assert [%{"path" => "/staff/a"}, %{"kind" => "page_view", "path" => "/staff/b"}] = events()
     end
   end
 end

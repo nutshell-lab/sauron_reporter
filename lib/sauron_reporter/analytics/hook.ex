@@ -1,37 +1,44 @@
 if Code.ensure_loaded?(Phoenix.LiveView) do
   defmodule SauronReporter.Analytics.Hook do
     @moduledoc """
-    Page views for live navigations (plan 28): a visitor moving between
-    pages over the socket makes no HTTP request, so
-    `SauronReporter.Analytics.Plug` never sees it. Modelled on phx-cms's
-    `CmsEngine.Analytics.Hook`.
+    Page views — a person's (plan 32) — to Sauron: one when a page's live
+    connection opens, one per live navigation. A live connection is the
+    proof a browser ran the page's script, which no robot fetching HTML
+    gives; `SauronReporter.Analytics.Plug` sends the HTTP request as a
+    `page_request`, and Sauron pairs the two (the same visitor — its IP
+    and user agent — and the same path, within seconds). Modelled on
+    phx-cms's `CmsEngine.Analytics.Hook`.
 
         live_session :public,
           on_mount: [MyAppWeb.UserAuth, SauronReporter.Analytics.Hook] do
           ...
         end
 
-    After the hook that assigns the user, so `:sauron_user_id` (or the
-    `user_assign`) is there. Options, as `{SauronReporter.Analytics.Hook,
-    opts}`: `trust_forwarded` (over the configuration's), and `count:
-    :connected` for routes the plug does not count — the first page then
-    counts here, when its live connection opens (no referrer: the HTTP
-    request's is not on the socket).
+    On every `live_session` that serves pages, after the hook that
+    assigns the user, so `:sauron_user_id` (or the `user_assign`) is
+    there. Options, as `{SauronReporter.Analytics.Hook, opts}`:
+    `trust_forwarded` (over the configuration's). `count:` is no longer
+    read (0.7.0): every page counts when its live connection opens, as
+    `count: :connected` did.
 
     What counts:
 
-      * the first page of a visit was the plug's (its HTTP request): the
-        first `handle_params` of the connection only remembers it;
-      * a `patch` to another path is a page view, the previous URL its
-        referrer — what a browser would have sent;
-      * a `navigate` mounts the next LiveView afresh, with the previous
-        URL in its connect params (`_live_referer`): its first
-        `handle_params` is a page view;
-      * a reconnection (`_mounts` > 0) and a patch that only changes the
-        query are not;
+      * the page a connected mount opens on: the first of a visit, with
+        the path its HTTP request had (no referrer: the request's is not
+        on the socket — Sauron has it on the `page_request`), or the
+        page a `navigate` mounted, the previous URL in its connect
+        params (`_live_referer`) its referrer;
+      * a `patch` to another path, the previous URL its referrer — what
+        a browser would have sent;
+      * not the disconnected mount (the HTTP render: a robot gets that
+        far), nor a reconnection (`_mounts` > 0), nor a patch that only
+        changes the query;
       * nor a page under the paths the plug never reports — assets, the
         live socket, the app's `ignore_paths` (0.6.1; a patch from it to
         another page counts, its referrer the host only).
+
+    A robot's socket is tracked like a person's (0.7.0): a headless
+    browser that says what it is still says it, and Sauron sorts it.
 
     The path is sent as the plug sends it (0.6.1): the app's
     `redact_paths` applied, token-shaped segments masked (see
@@ -44,6 +51,15 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
           websocket: [connect_info: [:peer_data, :user_agent, :x_headers, session: @session_options]],
           longpoll: [connect_info: [:peer_data, :user_agent, :x_headers, session: @session_options]]
 
+    They must be the plug's, or Sauron cannot pair a page view with its
+    request: the user agent is the browser's on both; the IP is the last
+    (or first, `trust_forwarded: :first`) `X-Forwarded-For` hop of the
+    socket's `:x_headers` with `trust_forwarded`, as the plug reads it on
+    the request — so behind a proxy, `trust_forwarded` it is. Without
+    it the hook has only the socket's peer (`:peer_data`), which is the
+    plug's `conn.remote_ip` only when nothing rewrites it (no proxy, no
+    `RemoteIp`).
+
     **Ours (0.6.0)** is never counted, nor `track/3`ed (see
     `SauronReporter.Analytics`): a signed-in user by the socket's assigns
     — the `user_assign`'s email under `ignore_emails`, or `:sauron_ignore`
@@ -55,10 +71,8 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     socket read (`session: @session_options` in `connect_info`): the flag
     reaches the hook through either.
 
-    `:x_headers` only matters with `trust_forwarded`; without it the IP is
-    the socket's peer. A crawler's socket is not tracked (`send_bots:
-    true` tracks it). `SauronReporter.Analytics.track(socket, name, props)`
-    sends a custom event from the page this hook last saw.
+    `SauronReporter.Analytics.track(socket, name, props)` sends a custom
+    event from the page this hook last saw.
     """
 
     import Phoenix.LiveView
@@ -94,12 +108,12 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       uri = URI.parse(url)
 
       cond do
-        context.last_path == nil and context.navigated? ->
+        # The page the live connection opened on: the visit's first (its
+        # request was the plug's) or the one a `navigate` mounted.
+        context.last_path == nil and not context.remount? ->
           record(socket, context, uri, context.live_referer)
 
-        context.last_path == nil and context.count == :connected and not context.remount? ->
-          record(socket, context, uri, nil)
-
+        # A reconnection's page was counted when it first connected.
         context.last_path == nil ->
           :seed
 
@@ -181,27 +195,19 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     end
 
     # `get_connect_info/2` and `get_connect_params/1` answer at mount only.
+    # The options' `count:` (before 0.7.0) is no longer read.
     defp build_context(socket, opts) do
-      ua = Analytics.cut(get_connect_info(socket, :user_agent), 1_000)
+      params = get_connect_params(socket) || %{}
 
-      if Analytics.bot?(ua) and Analytics.setting(:send_bots, false) != true do
-        nil
-      else
-        params = get_connect_params(socket) || %{}
-        referer = params["_live_referer"]
-
-        %{
-          ip: ip(socket, Analytics.trust_forwarded(opts)),
-          ua: ua,
-          live_referer: referer,
-          navigated?: is_binary(referer) and (params["_mounts"] || 0) == 0,
-          remount?: (params["_mounts"] || 0) > 0,
-          count: if(Keyword.get(opts, :count) == :connected, do: :connected, else: :request),
-          last_path: nil,
-          last_url: nil,
-          site: nil
-        }
-      end
+      %{
+        ip: ip(socket, Analytics.trust_forwarded(opts)),
+        ua: Analytics.cut(get_connect_info(socket, :user_agent), 1_000),
+        live_referer: params["_live_referer"],
+        remount?: (params["_mounts"] || 0) > 0,
+        last_path: nil,
+        last_url: nil,
+        site: nil
+      }
     end
 
     defp ip(socket, mode) do
@@ -211,11 +217,13 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
           _ -> nil
         end
 
+      # Every X-Forwarded-For header, joined as the plug joins them.
       forwarded =
         mode &&
-          case List.keyfind(get_connect_info(socket, :x_headers) || [], "x-forwarded-for", 0) do
-            {_, chain} -> Analytics.forwarded_ip(chain, mode)
-            nil -> nil
+          case for {"x-forwarded-for", chain} <- get_connect_info(socket, :x_headers) || [],
+                   do: chain do
+            [] -> nil
+            chains -> Analytics.forwarded_ip(Enum.join(chains, ","), mode)
           end
 
       forwarded || peer

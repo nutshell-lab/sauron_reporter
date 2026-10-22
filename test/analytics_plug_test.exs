@@ -102,7 +102,7 @@ defmodule SauronReporter.AnalyticsPlugTest do
 
   defp kinds(events), do: Enum.map(events, & &1["kind"])
 
-  test "an HTML page: a timing and a page view, with route, visitor, referrer, UTM and user" do
+  test "an HTML page: a timing and a page request, with route, visitor, referrer, UTM, user and status" do
     configure_analytics(user_assign: :current_user)
 
     request(
@@ -111,7 +111,7 @@ defmodule SauronReporter.AnalyticsPlugTest do
       headers: [{"referer", "https://www.google.com/search?q=offres"}]
     )
 
-    assert [timing, page_view] = events()
+    assert [timing, page_request] = events()
 
     common = %{
       "site" => "www.example.fr",
@@ -124,17 +124,20 @@ defmodule SauronReporter.AnalyticsPlugTest do
     }
 
     assert Map.take(timing, Map.keys(common)) == common
-    assert Map.take(page_view, Map.keys(common)) == common
+    assert Map.take(page_request, Map.keys(common)) == common
 
     assert %{"kind" => "timing", "method" => "GET", "status" => 200, "duration_ms" => d} = timing
     assert is_float(d) and d >= 0
     refute Map.has_key?(timing, "utm_source")
 
-    assert %{"kind" => "page_view", "utm_source" => "newsletter", "utm_campaign" => "octobre"} =
-             page_view
+    assert %{
+             "kind" => "page_request",
+             "status" => 200,
+             "utm_source" => "newsletter",
+             "utm_campaign" => "octobre"
+           } = page_request
 
-    refute Map.has_key?(page_view, "status")
-    refute inspect(page_view) =~ "secret"
+    refute inspect(page_request) =~ "secret"
   end
 
   test ":sauron_user_id before the user_assign" do
@@ -149,32 +152,38 @@ defmodule SauronReporter.AnalyticsPlugTest do
     assert user == Analytics.user_id("abc")
   end
 
-  test "not a page view: JSON, a POST, a redirect, a crawler, a prefetch — but each timed" do
+  test "not a page request: JSON, a POST, a redirect, a prefetch — but each timed" do
     request(:get, "https://www.example.fr/api/offres")
     request(:post, "https://www.example.fr/contact")
     request(:get, "https://www.example.fr/old")
-
-    request(:get, "https://www.example.fr/offres/1",
-      ua: "Mozilla/5.0 (compatible; Googlebot/2.1)"
-    )
-
     request(:get, "https://www.example.fr/offres/1", headers: [{"sec-purpose", "prefetch"}])
 
     events = events()
-    assert kinds(events) == List.duplicate("timing", 5)
-    assert Enum.map(events, & &1["status"]) == [200, 200, 302, 200, 200]
-    assert Enum.map(events, & &1["method"]) == ~w(GET POST GET GET GET)
+    assert kinds(events) == List.duplicate("timing", 4)
+    assert Enum.map(events, & &1["status"]) == [200, 200, 302, 200]
+    assert Enum.map(events, & &1["method"]) == ~w(GET POST GET GET)
   end
 
-  test "send_bots: true sends crawlers' page views (Sauron counts them apart)" do
-    configure_analytics(send_bots: true)
+  test "never a page view: that is the hook's, once a browser ran the page (0.7.0)" do
+    request(:get, "https://www.example.fr/offres/1")
+    refute "page_view" in kinds(events())
+  end
+
+  test "robots' requests are sent like anyone's: Sauron names and sorts them (0.7.0)" do
+    for ua <- ["Mozilla/5.0 (compatible; Googlebot/2.1)", "curl/8.0", "Sauron/0.1 (probe)"] do
+      request(:get, "https://www.example.fr/offres/1", ua: ua, plug: [timings: false])
+      assert [%{"kind" => "page_request", "ua" => ^ua}] = events()
+    end
+
+    # `send_bots: false`, before 0.7.0, is no longer read.
+    configure_analytics(send_bots: false)
     request(:get, "https://www.example.fr/offres/1", ua: "curl/8.0")
-    assert kinds(events()) == ["timing", "page_view"]
+    assert kinds(events()) == ["timing", "page_request"]
   end
 
-  test "a 304 to a browser asking for HTML is a page view" do
+  test "a 304 to a browser asking for HTML is a page request" do
     request(:get, "https://www.example.fr/cached")
-    assert kinds(events()) == ["timing", "page_view"]
+    assert [_timing, %{"kind" => "page_request", "status" => 304}] = events()
   end
 
   test "health checks, assets and ignore_paths: nothing at all" do
@@ -185,13 +194,13 @@ defmodule SauronReporter.AnalyticsPlugTest do
     assert events() == []
   end
 
-  test "a secret in the path (0.6.1): masked in the page view and the timing; the route as it is" do
+  test "a secret in the path (0.6.1): masked in the page request and the timing; the route as it is" do
     token = "Xb3kQ9vN2mLp7RtY5wZc1HfJ8sDg4AeU"
     request(:get, "https://www.example.fr/offres/#{token}")
 
     assert [
              %{"kind" => "timing", "path" => "/offres/:token", "route" => "/offres/:id"},
-             %{"kind" => "page_view", "path" => "/offres/:token", "route" => "/offres/:id"}
+             %{"kind" => "page_request", "path" => "/offres/:token", "route" => "/offres/:id"}
            ] = events()
 
     configure_analytics(redact_paths: ["/offres/:offer"])
@@ -199,12 +208,15 @@ defmodule SauronReporter.AnalyticsPlugTest do
     assert [%{"path" => "/offres/:offer"}, %{"path" => "/offres/:offer"}] = events()
   end
 
-  test "page_views: false and timings: false keep one of the two" do
+  test "page_requests: false and timings: false keep one of the two; page_views: false still read" do
+    request(:get, "https://www.example.fr/offres/1", plug: [page_requests: false])
+    assert kinds(events()) == ["timing"]
+
     request(:get, "https://www.example.fr/offres/1", plug: [page_views: false])
     assert kinds(events()) == ["timing"]
 
     request(:get, "https://www.example.fr/offres/1", plug: [timings: false])
-    assert kinds(events()) == ["page_view"]
+    assert kinds(events()) == ["page_request"]
   end
 
   test "trust_forwarded: the last X-Forwarded-For hop, or the first; remote_ip otherwise" do
@@ -243,7 +255,7 @@ defmodule SauronReporter.AnalyticsPlugTest do
       configure_analytics(ignore_emails: ["@nutshell-lab.com"])
     end
 
-    test "a signed-in user under ignore_emails, without case: timed, no page view, the cookie set" do
+    test "a signed-in user under ignore_emails, without case: timed, no page request, the cookie set" do
       conn = request(:get, "https://www.example.fr/staff/1")
 
       assert [%{"kind" => "timing", "status" => 200}] = events()
@@ -270,7 +282,7 @@ defmodule SauronReporter.AnalyticsPlugTest do
       refute hd(get_resp_header(conn, "set-cookie")) =~ "secure"
     end
 
-    test "the assign :sauron_ignore, the app's own word: no page view, the cookie set" do
+    test "the assign :sauron_ignore, the app's own word: no page request, the cookie set" do
       configure_analytics([])
       conn = request(:get, "https://www.example.fr/offres/1", assigns: [sauron_ignore: true])
 
@@ -278,7 +290,7 @@ defmodule SauronReporter.AnalyticsPlugTest do
       assert %{value: "1"} = conn.resp_cookies["sauron_ignore"]
     end
 
-    test "the cookie alone, signed out: no page view, the timing still; not set again" do
+    test "the cookie alone, signed out: no page request, the timing still; not set again" do
       conn =
         request(:get, "https://www.example.fr/offres/1",
           headers: [{"cookie", "theme=dark; sauron_ignore=1"}]
@@ -288,19 +300,19 @@ defmodule SauronReporter.AnalyticsPlugTest do
       refute Map.has_key?(conn.resp_cookies, "sauron_ignore")
     end
 
-    test "not ours: a page view, and no cookie" do
+    test "not ours: a page request, and no cookie" do
       conn = request(:get, "https://www.example.fr/offres/1")
-      assert kinds(events()) == ["timing", "page_view"]
+      assert kinds(events()) == ["timing", "page_request"]
       assert get_resp_header(conn, "set-cookie") == []
 
       configure_analytics(ignore_emails: ["@other.fr", ""])
       conn = request(:get, "https://www.example.fr/staff/1")
-      assert kinds(events()) == ["timing", "page_view"]
+      assert kinds(events()) == ["timing", "page_request"]
       assert get_resp_header(conn, "set-cookie") == []
 
       configure_analytics([])
       request(:get, "https://www.example.fr/staff/1", headers: [{"cookie", "sauron_ignore="}])
-      assert kinds(events()) == ["timing", "page_view"]
+      assert kinds(events()) == ["timing", "page_request"]
     end
 
     test "a fetched session gets the flag for the hook; an unfetched one is left alone" do

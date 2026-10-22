@@ -1,15 +1,25 @@
 defmodule SauronReporter.Analytics.Plug do
   @moduledoc """
-  Page views and server timings to Sauron (plan 28), decided once the
-  response is known (`register_before_send`):
+  Page requests and server timings to Sauron (plan 28, plan 32),
+  decided once the response is known (`register_before_send`):
 
     * **a timing** for every request: method, the router's pattern
       (`/offres/:id`, when a `Phoenix.Router` answered), status and
       duration from this plug to the response;
-    * **a page view** for an HTML page served: a `GET` answered 2xx with
-      `text/html`, or a 304 to a browser asking for HTML; not a
-      prefetch, not a crawler (Sauron's own user-agent test; `send_bots:
-      true` sends them). Redirects are not page views: their target is.
+    * **a page request** (0.7.0) for an HTML page served: a `GET`
+      answered 2xx with `text/html`, or a 304 to a browser asking for
+      HTML; not a prefetch. Redirects are not page requests: their
+      target is. A robot's request is sent like a person's — Sauron
+      names and sorts robots, by their user agent, their network and
+      whether a page view ever confirmed the request.
+
+  A page request is not a page view: anything that speaks HTTP makes
+  one. The page view — a person's — is the proof a browser ran the
+  page: `SauronReporter.Analytics.Hook` sends it when the page's live
+  connection opens, with the request's path, IP and user agent, so
+  Sauron pairs the two. A dead page (no LiveView) is a page request
+  only — as it is in an app that counts its visits on the live
+  connection.
 
   Both carry the site (`conn.host`), the path (never the query), the
   visitor's IP and user agent (Sauron hashes them, keeps neither), the
@@ -26,7 +36,7 @@ defmodule SauronReporter.Analytics.Plug do
 
   **Ours (0.6.0).** A request that is ours (see `SauronReporter.Analytics`:
   the `user_assign`'s email under `ignore_emails`, or the assign
-  `:sauron_ignore`) is timed, never a page view, and its response sets
+  `:sauron_ignore`) is timed, never a page request, and its response sets
   the cookie `sauron_ignore=1` — a year, path `/`, `HttpOnly`,
   `SameSite=Lax`, `Secure` over https, no identifier in it. A request
   carrying that cookie is ours too, signed in or not, so a person of the
@@ -40,14 +50,16 @@ defmodule SauronReporter.Analytics.Plug do
   fetching the session itself. For the hook to leave out a signed-out
   person of the app, the session must be fetched before this plug: put
   it after `:fetch_session` — in the `:browser` pipeline (`timings:
-  false` there, `page_views: false` in the endpoint), or behind `plug
-  :fetch_session` in the endpoint. Otherwise only their live navigations
-  are counted; a signed-in user is always left out (the hook reads the
+  false` there, `page_requests: false` in the endpoint), or behind `plug
+  :fetch_session` in the endpoint. Otherwise their page views are
+  counted (since 0.7.0 the hook sends every page view, the first one
+  included); a signed-in user is always left out (the hook reads the
   assigns).
 
-  Options: `page_views: false` or `timings: false` keep one of the two —
-  a timing plug in the endpoint and a page-view plug in the pipeline of
-  the public pages, say — and `trust_forwarded` (see
+  Options: `page_requests: false` (`page_views: false`, its name before
+  0.7.0, still read) or `timings: false` keep one of the two — a timing
+  plug in the endpoint and a page-request plug in the pipeline of the
+  public pages, say — and `trust_forwarded` (see
   `SauronReporter.Analytics`), over the configuration's. A no-op while
   analytics is not enabled.
   """
@@ -100,10 +112,10 @@ defmodule SauronReporter.Analytics.Plug do
       )
     end
 
-    if Keyword.get(opts, :page_views, true) and not ours? and page_view?(conn, context) do
+    if page_requests?(opts) and not ours? and page_request?(conn) do
       Analytics.push(
         context
-        |> Map.merge(%{"kind" => "page_view", "route" => route})
+        |> Map.merge(%{"kind" => "page_request", "route" => route, "status" => conn.status})
         |> Map.merge(Analytics.utm(conn.query_string))
       )
     end
@@ -159,9 +171,12 @@ defmodule SauronReporter.Analytics.Plug do
     }
   end
 
-  defp page_view?(conn, context) do
-    conn.method == "GET" and html?(conn) and not prefetch?(conn) and
-      (Analytics.setting(:send_bots, false) == true or not Analytics.bot?(context["ua"]))
+  # `page_views:`, the option's name before 0.7.0, still read.
+  defp page_requests?(opts),
+    do: Keyword.get(opts, :page_requests, Keyword.get(opts, :page_views, true)) != false
+
+  defp page_request?(conn) do
+    conn.method == "GET" and html?(conn) and not prefetch?(conn)
   end
 
   defp html?(%{status: status} = conn) when status in 200..299 do

@@ -17,7 +17,7 @@ IPs, headers or job arguments.
 
 ```elixir
 # mix.exs
-{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.6.1"}
+{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.7.0"}
 ```
 
 ErrorTracker is configured by the app (its repo is the local buffer):
@@ -52,7 +52,8 @@ The token is 24 random bytes, URL-safe, in Sauron's `REPORT_TOKENS` as
 ## Analytics: visits, events and timings (0.5.0)
 
 Sauron's plan 28: every app's page views, custom events, server timings
-and signed-in users, consolidated in Sauron — beside the app's own
+and signed-in users, consolidated in Sauron — and since 0.7.0 (plan 32)
+every page served, people and robots told apart there — beside the app's own
 analytics, which it keeps. Cookieless: the app forwards each visitor's
 IP and user agent, Sauron hashes them with a salt of the day and keeps
 neither. Off until `analytics: [enabled: true]`; the same `url`, `token`
@@ -78,7 +79,7 @@ plug SauronReporter.Analytics.Plug
 socket "/live", Phoenix.LiveView.Socket,
   websocket: [connect_info: [:peer_data, :user_agent, :x_headers, session: @session_options]]
 
-# router.ex — after the hook that assigns the user
+# router.ex — on every live_session with pages, after the hook that assigns the user
 live_session :default, on_mount: [MyAppWeb.UserAuth, SauronReporter.Analytics.Hook] do
 
 # anywhere: a custom event, from a conn, a socket or a map
@@ -86,16 +87,15 @@ SauronReporter.Analytics.track(conn, "signup", %{plan: "pro"})
 ```
 
 - **The plug**: a timing for every request (method, the router's
-  pattern, status, duration), a page view for an HTML page served (a
+  pattern, status, duration), a page request for an HTML page served (a
   `GET` answered 2xx with `text/html`, or a 304); not redirects,
-  prefetches, crawlers (Sauron's own user-agent test), assets, health
-  checks or the live socket. `page_views: false` / `timings: false`
+  prefetches, assets, health checks or the live socket. Robots' too
+  (0.7.0): Sauron sorts them. `page_requests: false` / `timings: false`
   split it between the endpoint and a pipeline.
-- **The hook**: a page view per live navigation (a `patch` to another
-  path, a `navigate`), never the first page (the plug's) nor a
-  reconnection — unless `{SauronReporter.Analytics.Hook, count:
-  :connected}`, for routes the plug does not count: the first page then
-  counts when its live connection opens.
+- **The hook**: the page views (0.7.0) — one when a page's live
+  connection opens, with the request's path, one per live navigation
+  (a `patch` to another path, a `navigate`); never the HTTP render nor a
+  reconnection.
 - **The user**: the assign `:sauron_user_id`, else `user_assign:`'s
   `id` (`:current_user` by default), hashed with `user_key`
   (HMAC-SHA256, 32 hex) before it leaves.
@@ -127,8 +127,8 @@ people — to Sauron's analytics. A request or a socket is *ours* when:
   socket in an `on_mount`);
 - the request carries the cookie `sauron_ignore`.
 
-Ours sends no page view and no custom event (`track/3` answers `:ok` and
-sends nothing). Its timings still go: server performance is not about
+Ours sends no page request, no page view and no custom event (`track/3`
+answers `:ok` and sends nothing). Its timings still go: server performance is not about
 who.
 
 **The cookie.** The plug answers an ours signed-in request (or one the
@@ -138,7 +138,7 @@ request carrying it is ours, signed in or not — so a person of the app
 browsing its public pages signed out stays left out. Its name is fixed.
 The plug reads cookies itself; it needs no session for that.
 
-**Live navigations.** The hook leaves out a signed-in user by the
+**The hook.** The hook leaves out a signed-in user by the
 socket's assigns (the app's hook assigning the user comes first, as
 already required). A signed-out person with the cookie it learns from
 the session — a connected mount reads no cookie, but its session is the
@@ -162,8 +162,57 @@ end
 
 (or `plug :fetch_session` right before the plug in the endpoint).
 Without it, everything else holds — ours by the user, by the assign, by
-the cookie on every HTTP request — but a signed-out person's live
-navigations are counted.
+the cookie on every HTTP request — but a signed-out person's page views
+are counted (since 0.7.0 every page view is the hook's, the first one
+included).
+
+## People and robots (0.7.0)
+
+Sauron's plan 32: every page Sauron hears of is a person's or a robot's,
+and its audience figures are people's. A robot fetches HTML, posing as
+a browser if it likes; it does not open a LiveView's live connection. So:
+
+- **the plug** sends each HTML page served as a `page_request` — the
+  fields 0.6's page view had (site, path, route, referrer host, UTM, IP,
+  user agent, user) and the status (200, 304);
+- **the hook** sends the `page_view`, a person's, when the page's live
+  connection opens — the first page of a visit, with the request's path
+  — and on each live navigation. `count: :connected` was that already;
+  it is now the only way, and `count:` is not read;
+- **a dead page** (no LiveView) is a request only — as in the apps that
+  count their visits on the live connection (phx-cms's `count:
+  :connected`);
+- **robots** are sent: the client no longer drops a user agent that
+  names a robot (`send_bots` is not read). Sauron names them (Googlebot,
+  GPTBot, its own probes…) and sorts the disguised ones by network and
+  by the requests no page view confirmed.
+
+Sauron pairs a request with its page view by the visitor — the hash of
+the IP and user agent forwarded on both — and the path, within 30
+seconds. The hook must therefore forward what the plug forwards:
+
+- the socket passes `connect_info: [:peer_data, :user_agent, :x_headers,
+  session: @session_options]` (websocket and longpoll);
+- behind a proxy, `trust_forwarded` is set: the plug reads the last
+  `X-Forwarded-For` hop of the request, the hook the same hop of the
+  socket's `:x_headers`. Without it the hook has the socket's peer only,
+  which is the plug's `conn.remote_ip` only when nothing rewrites it.
+
+What an app checks when it moves to 0.7.0:
+
+1. the socket's `connect_info` above, on `/live`'s websocket and
+   longpoll;
+2. the hook on **every** `live_session` that serves pages — a page
+   without it is no longer counted at all (its request is, as a
+   request);
+3. `{SauronReporter.Analytics.Hook, count: :connected}` can become the
+   plain hook (`count:` is ignored);
+4. `trust_forwarded` behind Caddy (the fleet's apps have it);
+5. the plug after `:fetch_session` somewhere in the pipeline of the
+   pages, so a signed-out person of ours is left out of the first page
+   view too (it is the hook's now);
+6. `send_bots` and `page_views: false` can go (`page_requests: false`
+   is the plug option's name now; the old one is still read).
 
 ## Paths carry no secret (0.6.1)
 
