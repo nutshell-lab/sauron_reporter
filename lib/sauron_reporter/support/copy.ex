@@ -4,9 +4,11 @@ defmodule SauronReporter.Support.Copy do
   app's voice (the team the app names, not Sauron's), times and days in
   the user's zone, sizes.
 
-  Sauron sends each system message with a `code` and its own text; the
-  codes the panel knows are said here, with the app's team name and the
-  request's facts; any other is shown as Sauron wrote it.
+  Sauron sends each system message with a `code`, its own text and the
+  facts to word it (the operator's first name, a phone, the user's
+  email, a reason); the codes the panel knows are said here, with the
+  app's team name and those facts; any other is shown as Sauron wrote
+  it.
   """
 
   @days ~w(lundi mardi mercredi jeudi vendredi samedi dimanche)
@@ -48,64 +50,113 @@ defmodule SauronReporter.Support.Copy do
 
   @doc """
   A system message as the panel shows it: `{:line, text}` (a bubble in
-  the assistant's voice), `{:paragraphs, [text]}`, or `{:event, text}`
-  (a short centred line). `ctx` holds `team`, `email`, `request`.
+  the assistant's voice), `{:paragraphs, [text]}`, `{:searching, text}`
+  or `{:event, text}` (a short centred line). `ctx` holds `team`,
+  `email`, `request`.
+
+  Every code Sauron names is worded here, from the facts its event
+  carries (Sauron's step 3): `operator` (the first name), `phone`,
+  `email`, `reason` — the request's own facts when an older message has
+  none. Sauron's French `text` is shown only for a code the panel does
+  not know.
   """
-  def system(%{"type" => "event", "code" => code, "text" => text}, ctx),
-    do: event(code, text, ctx)
+  def system(%{"type" => "event", "code" => code} = content, ctx),
+    do: event(code, content, ctx)
 
   def system(%{"type" => "text", "body" => body}, _ctx), do: {:line, body}
   def system(%{"text" => text}, _ctx) when is_binary(text), do: {:line, text}
   def system(_content, _ctx), do: {:line, ""}
 
-  defp event("searching", _text, _ctx),
+  defp event("searching", _content, _ctx),
     do: {:searching, "Nous cherchons quelqu'un de disponible…"}
 
-  defp event("describe_issue", _text, _ctx) do
+  defp event("describe_issue", _content, _ctx) do
     {:line,
      "Décrivez le problème : ce que vous faisiez, ce qui s'est passé. Ajoutez des captures " <>
        "d'écran — plus il y a de détails, plus vite nous corrigeons."}
   end
 
-  defp event("describe_feature", _text, _ctx) do
+  defp event("describe_feature", _content, _ctx) do
     {:line,
      "Décrivez votre idée : ce qu'elle vous permettrait de faire. Appuyez sur « Terminé » " <>
        "pour l'envoyer."}
   end
 
-  defp event("submitted", _text, ctx),
-    do: {:line, "C'est envoyé à #{ctx.team} : nous vous répondrons ici, ou par e-mail."}
+  defp event("submitted", content, ctx) do
+    {:line,
+     "C'est envoyé à #{ctx.team} : nous vous répondrons ici, ou par e-mail#{to(content, ctx)}."}
+  end
 
-  defp event("no_operator", _text, ctx) do
-    email = if ctx[:email], do: " à #{ctx.email}", else: ""
-
+  defp event("no_operator", content, ctx) do
     {:paragraphs,
      [
        "Personne n'est disponible pour le moment. Votre demande reste ouverte : " <>
-         "nous vous répondrons par e-mail#{email}.",
+         "nous vous répondrons par e-mail#{to(content, ctx)}.",
        "Vous pouvez aussi demander à être rappelé."
      ]}
   end
 
-  defp event("claimed", text, ctx) do
-    case operator_name(ctx[:request]) do
-      nil -> {:event, text}
-      name -> {:event, "#{first_name(name)}, de #{ctx.team}, a rejoint la conversation"}
+  defp event("claimed", content, ctx) do
+    case operator(content, ctx) do
+      nil -> {:event, "Quelqu'un de #{ctx.team} a rejoint la conversation"}
+      name -> {:event, "#{name}, de #{ctx.team}, a rejoint la conversation"}
     end
   end
 
-  defp event("callback_requested", text, ctx) do
-    case ctx[:request] do
-      %{"callback_phone" => phone} when is_binary(phone) -> {:event, "Rappel demandé au #{phone}"}
-      _ -> {:event, text}
+  defp event("screenshot_asked", content, ctx),
+    do:
+      {:event,
+       "#{operator(content, ctx) || capitalize(ctx.team)} vous demande une capture d'écran"}
+
+  defp event("callback_requested", content, ctx) do
+    case phone(content, ctx) do
+      nil -> {:event, "Rappel demandé"}
+      phone -> {:event, "Rappel demandé au #{phone}"}
     end
   end
 
-  defp event(code, text, _ctx)
-       when code in ~w(called resolved closed_by_user screenshot_asked),
-       do: {:event, text}
+  defp event("called", content, ctx) do
+    who = operator(content, ctx) || capitalize(ctx.team)
 
-  defp event(_code, text, _ctx), do: {:line, text}
+    case phone(content, ctx) do
+      nil -> {:event, "#{who} vous a appelé"}
+      phone -> {:event, "#{who} vous a appelé au #{phone}"}
+    end
+  end
+
+  defp event("resolved", content, ctx),
+    do: {:event, "#{operator(content, ctx) || capitalize(ctx.team)} a clos cette demande"}
+
+  defp event("rejected", content, ctx) do
+    case filled(content["reason"]) do
+      nil -> {:line, "#{capitalize(ctx.team)} n'a pas retenu votre demande."}
+      reason -> {:line, "#{capitalize(ctx.team)} n'a pas retenu votre demande : #{reason}"}
+    end
+  end
+
+  defp event("closed_by_user", _content, _ctx), do: {:event, "Vous avez clos cette demande"}
+
+  defp event(_code, %{"text" => text}, _ctx) when is_binary(text), do: {:line, text}
+  defp event(_code, _content, _ctx), do: {:line, ""}
+
+  # The facts: the event's own, else the request's as it is now.
+  defp operator(content, ctx) do
+    first_name(filled(get_in(content, ["operator", "name"])) || operator_name(ctx[:request]))
+  end
+
+  defp phone(content, ctx) do
+    filled(content["phone"]) || filled(get_in(ctx, [:request, "callback_phone"]))
+  end
+
+  defp to(content, ctx) do
+    case filled(content["email"]) || filled(ctx[:email]) do
+      nil -> ""
+      email -> " à #{email}"
+    end
+  end
+
+  defp filled(value) when is_binary(value) and value != "", do: value
+  defp filled(_value), do: nil
 
   @doc "The name of the operator who claimed `request`, or `nil`."
   def operator_name(%{"claimed_by" => %{"name" => name}}) when is_binary(name) and name != "",

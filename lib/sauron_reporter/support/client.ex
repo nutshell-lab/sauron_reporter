@@ -13,9 +13,23 @@ defmodule SauronReporter.Support.Client do
   order, as soon as the channel is joined again; past its time it
   answers `{:error, :disconnected}`, and a call beyond the bound
   `{:error, :buffer_full}` at once. A call pushed whose reply does not
-  come within `call_timeout` (10 s) answers `{:error, :timeout}`; one
-  pushed when the link drops answers `{:error, :disconnected}` — it may
-  or may not have reached Sauron, so it is never pushed twice.
+  come within `call_timeout` (10 s) answers `{:error, :timeout}`.
+
+  **A call in flight when the link drops** may or may not have reached
+  Sauron. One Sauron answers the same however often it is asked — a
+  `message` or `upload_done` carrying a `ref` (since 0.8.1: Sauron
+  answers the message that ref first posted), `resume`, `resume_many`,
+  `history` — goes back to the buffer, first, and is pushed again once
+  joined, within its buffer time (`buffer_ttl` from when it was first
+  asked); past it, `{:error, :disconnected}`. Any other (`open`,
+  `submit`, `close`, `callback`) answers `{:error, :disconnected}` at
+  once and is never pushed twice.
+
+  **Resumes** (`resume/2`) are gathered: the users asked within
+  `resume_window` (100 ms) go in one `resume_many` call — 200 users at
+  most each — and each caller gets its user's threads. After a
+  reconnection every panel of the node asks at once: a call or a few,
+  not one per panel.
 
   **Casts** (`typing`, `read`) are pushed when the link is up and
   dropped otherwise: they are worth nothing late.
@@ -56,6 +70,7 @@ defmodule SauronReporter.Support.Client do
   alias SauronReporter.Support.Event
 
   @sweep_every 1_000
+  @max_resume 200
 
   @doc false
   def start_link(opts \\ []) do
@@ -70,16 +85,27 @@ defmodule SauronReporter.Support.Client do
   `:timeout`, `:buffer_full`, `:unavailable`).
   """
   def call(event, payload, server \\ __MODULE__) do
-    # The client answers every call itself within its buffer's and its
-    # reply's times; this is the margin over both.
-    GenServer.call(
-      server,
-      {:call, event, payload},
-      Support.setting(:buffer_ttl, 30_000) + Support.setting(:call_timeout, 10_000) + 5_000
-    )
+    GenServer.call(server, {:call, event, payload}, wait())
   catch
     :exit, _ -> {:error, :unavailable}
   end
+
+  @doc """
+  `user_id`'s requests not over yet: `{:ok, %{"threads" => [thread]}}`,
+  as a `resume` call answers, or `{:error, reason}` as `call/3`. Asked
+  with the other users of the next `resume_window` ms in one
+  `resume_many` call.
+  """
+  def resume(user_id, server \\ __MODULE__) do
+    GenServer.call(server, {:resume, to_string(user_id)}, wait() + window())
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  # The client answers every call itself within its buffer's and its
+  # reply's times; this is the margin over both.
+  defp wait,
+    do: Support.setting(:buffer_ttl, 30_000) + Support.setting(:call_timeout, 10_000) + 5_000
 
   @doc "Pushes `event` when the link is up, forgets it otherwise. Always `:ok`."
   def cast(event, payload, server \\ __MODULE__) do
@@ -117,7 +143,10 @@ defmodule SauronReporter.Support.Client do
         buffer: :queue.new(),
         buffered: 0,
         pending: %{},
+        seq: 0,
         present: %{},
+        resumes: %{},
+        resume_timer: nil,
         sweep: nil,
         failures: 0
       )
@@ -213,8 +242,8 @@ defmodule SauronReporter.Support.Client do
   @impl Slipstream
   def handle_reply(ref, reply, socket) do
     case Map.pop(socket.assigns.pending, ref) do
-      {{from, _deadline}, pending} ->
-        GenServer.reply(from, answer(reply))
+      {%{target: target}, pending} ->
+        respond(target, answer(reply))
         {:ok, assign(socket, :pending, pending)}
 
       {nil, _} ->
@@ -227,26 +256,30 @@ defmodule SauronReporter.Support.Client do
   def handle_call({:call, _event, _payload}, _from, %{assigns: %{status: :idle}} = socket),
     do: {:reply, {:error, :disabled}, socket}
 
+  def handle_call({:resume, _user_id}, _from, %{assigns: %{status: :idle}} = socket),
+    do: {:reply, {:error, :disabled}, socket}
+
   def handle_call({:call, event, payload}, from, socket) do
-    case socket.assigns.status == :joined && push_call(socket, event, payload, from) do
-      {:ok, socket} ->
-        {:noreply, ensure_sweep(socket)}
+    case submit(socket, event, payload, from, now() + positive(:buffer_ttl, 30_000)) do
+      {:ok, socket} -> {:noreply, socket}
+      {:error, reason, socket} -> {:reply, {:error, reason}, socket}
+    end
+  end
 
-      _not_joined ->
-        if socket.assigns.buffered >= positive(:max_buffer, 500) do
-          telemetry(:dropped, %{count: 1}, %{reason: :buffer_full}, socket)
-          {:reply, {:error, :buffer_full}, socket}
-        else
-          entry = {event, payload, from, now() + positive(:buffer_ttl, 30_000)}
+  def handle_call({:resume, user_id}, from, socket) do
+    resumes = Map.update(socket.assigns.resumes, user_id, [from], &[from | &1])
+    socket = assign(socket, :resumes, resumes)
 
-          socket =
-            assign(socket,
-              buffer: :queue.in(entry, socket.assigns.buffer),
-              buffered: socket.assigns.buffered + 1
-            )
+    cond do
+      map_size(resumes) >= @max_resume ->
+        {:noreply, flush_resumes(socket)}
 
-          {:noreply, ensure_sweep(socket)}
-        end
+      socket.assigns.resume_timer ->
+        {:noreply, socket}
+
+      true ->
+        timer = Process.send_after(self(), :flush_resumes, window())
+        {:noreply, assign(socket, :resume_timer, timer)}
     end
   end
 
@@ -297,6 +330,10 @@ defmodule SauronReporter.Support.Client do
     {:noreply, socket}
   end
 
+  def handle_info(:flush_resumes, socket) do
+    {:noreply, flush_resumes(assign(socket, :resume_timer, nil))}
+  end
+
   def handle_info(:sweep, socket) do
     {:noreply, socket |> assign(:sweep, nil) |> sweep() |> ensure_sweep()}
   end
@@ -311,11 +348,33 @@ defmodule SauronReporter.Support.Client do
 
   # ---------- calls ----------
 
-  defp push_call(socket, event, payload, from) do
-    case push(socket, socket.assigns.topic, event, payload) do
+  # Pushed now when joined, else held in the buffer until `expires`.
+  defp submit(socket, event, payload, target, expires) do
+    case socket.assigns.status == :joined &&
+           push_call(socket, %{event: event, payload: payload, target: target, expires: expires}) do
+      {:ok, socket} ->
+        {:ok, ensure_sweep(socket)}
+
+      _not_joined ->
+        if socket.assigns.buffered >= positive(:max_buffer, 500) do
+          telemetry(:dropped, %{count: waiting(target)}, %{reason: :buffer_full}, socket)
+          {:error, :buffer_full, socket}
+        else
+          entry = %{event: event, payload: payload, target: target, expires: expires}
+          {:ok, socket |> rebuffer(entry) |> ensure_sweep()}
+        end
+    end
+  end
+
+  defp push_call(socket, entry) do
+    case push(socket, socket.assigns.topic, entry.event, entry.payload) do
       {:ok, ref} ->
-        deadline = now() + positive(:call_timeout, 10_000)
-        {:ok, assign(socket, :pending, Map.put(socket.assigns.pending, ref, {from, deadline}))}
+        seq = socket.assigns.seq + 1
+
+        call =
+          Map.merge(entry, %{deadline: now() + positive(:call_timeout, 10_000), seq: seq})
+
+        {:ok, assign(socket, pending: Map.put(socket.assigns.pending, ref, call), seq: seq)}
 
       {:error, _reason} = error ->
         error
@@ -330,13 +389,13 @@ defmodule SauronReporter.Support.Client do
     {entries, socket} = take_buffer(socket)
     now = now()
 
-    Enum.reduce(entries, socket, fn {event, payload, from, deadline} = entry, socket ->
+    Enum.reduce(entries, socket, fn entry, socket ->
       cond do
-        deadline < now ->
-          expire(socket, from, :expired)
+        entry.expires < now ->
+          expire(socket, entry.target, :expired)
 
         socket.assigns.status == :joined ->
-          case push_call(socket, event, payload, from) do
+          case push_call(socket, entry) do
             {:ok, socket} -> socket
             {:error, _} -> rebuffer(socket, entry)
           end
@@ -358,14 +417,15 @@ defmodule SauronReporter.Support.Client do
     )
   end
 
-  defp expire(socket, from, reason) do
-    GenServer.reply(from, {:error, if(reason == :timeout, do: :timeout, else: :disconnected)})
-    telemetry(:dropped, %{count: 1}, %{reason: reason}, socket)
+  defp expire(socket, target, reason) do
+    respond(target, {:error, if(reason == :timeout, do: :timeout, else: :disconnected)})
+    telemetry(:dropped, %{count: waiting(target)}, %{reason: reason}, socket)
     socket
   end
 
   # The link or the channel is gone: the calls in flight will never be
-  # answered — and may or may not have reached Sauron.
+  # answered — and may or may not have reached Sauron. Those Sauron
+  # answers the same twice wait for the link again, first in line.
   defp lost(socket, reason) do
     failures = socket.assigns.failures + 1
 
@@ -376,24 +436,45 @@ defmodule SauronReporter.Support.Client do
 
     if socket.assigns.status == :joined, do: broadcast_link(socket, :down)
 
-    Enum.each(socket.assigns.pending, fn {_ref, {from, _}} ->
-      expire(socket, from, :disconnected)
-    end)
+    now = now()
 
-    assign(socket, status: :connecting, pending: %{}, failures: failures)
+    {again, gone} =
+      socket.assigns.pending
+      |> Map.values()
+      |> Enum.sort_by(& &1.seq)
+      |> Enum.split_with(&(retryable?(&1) and &1.expires >= now))
+
+    Enum.each(gone, &expire(socket, &1.target, :disconnected))
+
+    again = Enum.map(again, &Map.take(&1, [:event, :payload, :target, :expires]))
+
+    socket
+    |> assign(
+      status: :connecting,
+      pending: %{},
+      failures: failures,
+      buffer: :queue.join(:queue.from_list(again), socket.assigns.buffer),
+      buffered: socket.assigns.buffered + length(again)
+    )
+    |> ensure_sweep()
   end
+
+  @readers ~w(resume resume_many history)
+  defp retryable?(%{event: event}) when event in @readers, do: true
+  defp retryable?(%{payload: %{"ref" => ref}}) when is_binary(ref) and ref != "", do: true
+  defp retryable?(_call), do: false
 
   defp sweep(socket) do
     now = now()
 
     {late, pending} =
-      Enum.split_with(socket.assigns.pending, fn {_ref, {_from, deadline}} -> deadline < now end)
+      Enum.split_with(socket.assigns.pending, fn {_ref, call} -> call.deadline < now end)
 
-    Enum.each(late, fn {_ref, {from, _}} -> expire(socket, from, :timeout) end)
+    Enum.each(late, fn {_ref, call} -> expire(socket, call.target, :timeout) end)
 
     {entries, socket} = take_buffer(socket)
-    {old, kept} = Enum.split_with(entries, fn {_, _, _, deadline} -> deadline < now end)
-    Enum.each(old, fn {_, _, from, _} -> expire(socket, from, :expired) end)
+    {old, kept} = Enum.split_with(entries, &(&1.expires < now))
+    Enum.each(old, &expire(socket, &1.target, :expired))
 
     assign(socket,
       pending: Map.new(pending),
@@ -409,6 +490,57 @@ defmodule SauronReporter.Support.Client do
   end
 
   defp ensure_sweep(socket), do: socket
+
+  # ---------- resumes ----------
+
+  # The users asked so far, 200 to a `resume_many`; each batch answers
+  # its callers (`respond/2`).
+  defp flush_resumes(socket) do
+    if timer = socket.assigns.resume_timer, do: Process.cancel_timer(timer)
+    resumes = socket.assigns.resumes
+    socket = assign(socket, resumes: %{}, resume_timer: nil)
+    expires = now() + positive(:buffer_ttl, 30_000)
+
+    resumes
+    |> Enum.chunk_every(@max_resume)
+    |> Enum.reduce(socket, fn chunk, socket ->
+      batch = Map.new(chunk)
+      payload = %{"user_ids" => Map.keys(batch)}
+
+      case submit(socket, "resume_many", payload, {:resume_many, batch}, expires) do
+        {:ok, socket} ->
+          socket
+
+        {:error, reason, socket} ->
+          respond({:resume_many, batch}, {:error, reason})
+          socket
+      end
+    end)
+  end
+
+  # A caller's answer; a `resume_many`'s goes to each user's callers.
+  defp respond({:resume_many, batch}, {:ok, %{"threads" => threads}}) when is_map(threads) do
+    for {user_id, froms} <- batch, from <- froms do
+      GenServer.reply(from, {:ok, %{"threads" => List.wrap(threads[user_id])}})
+    end
+
+    :ok
+  end
+
+  defp respond({:resume_many, batch}, result) do
+    result = if match?({:error, _}, result), do: result, else: {:error, :unavailable}
+    for {_user_id, froms} <- batch, from <- froms, do: GenServer.reply(from, result)
+    :ok
+  end
+
+  defp respond(from, result), do: GenServer.reply(from, result)
+
+  defp waiting({:resume_many, batch}),
+    do: batch |> Map.values() |> Enum.map(&length/1) |> Enum.sum()
+
+  defp waiting(_from), do: 1
+
+  defp window, do: positive(:resume_window, 100)
 
   # Sauron's reply as the library answers it.
   defp answer({:ok, body}) when is_map(body), do: {:ok, body}

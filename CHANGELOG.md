@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.8.1 — 2026-10-23
+
+The support chat adopts the protocol Sauron completed in plan 29's step
+3. Needs a Sauron with step 3 (`resume_many`, `?user_id=` on the files,
+a message's `ref`; Sauron 6a7710c).
+
+- **The system's lines, every one in the app's voice**: the panel words
+  each from the facts Sauron now sends with it — the operator's first
+  name (`claimed`, `screenshot_asked`, `called`, `resolved`), the phone
+  (`callback_requested`, `called`), the user's email (`submitted`,
+  `no_operator`), the reason (`rejected`) — and the team the component
+  names. Sauron's French `text` is no longer shown for
+  `screenshot_asked`, `called`, `resolved`, `rejected` or
+  `closed_by_user`; it stays the words of a code the panel does not
+  know. The screenshot banner names the operator who asked.
+- **The team goes to Sauron**: `open/4` takes `team:` (100 characters
+  at most), and the panel sends its `team` attribute, so Sauron's own
+  lines — its emails, the operators' pages — say « l'équipe m2 ». The
+  attribute's default is now `nil` (the panel still says « l'équipe »):
+  a panel that names no team sends none.
+- **Images shown**: `SauronReporter.Support.Preview`, a LiveComponent,
+  fetches each image of the conversation from the app's server for the
+  panel's user (`fetch_file/3`, `GET /support/files/:id?user_id=…`) and
+  renders it as a `data:` URL, once over the socket. No route for the
+  app to mount; the browser never sees Sauron's URL or token. Up to
+  `preview_max_size` (3 MB; `0`, chips only); larger images, failed
+  fetches and PDFs stay chips. An app with a CSP allows `img-src data:`.
+- **Retries posted once**: `send_message/3` and `upload_done/4` (and
+  `attach/6`) carry a `ref` — the caller's, or `new_ref/0`. A message
+  or upload in flight when the link drops goes back to the buffer and
+  is pushed again once joined, within its buffer time (`buffer_ttl`
+  from when it was asked): no more « Non envoyé » for a dropped link.
+  `resume` and `history` are pushed again too; `open`, `submit`,
+  `close`, `callback` still answer `{:error, :disconnected}`. The panel
+  makes one ref per message the user sends (a file is uploaded once and
+  given again under its ref on « Réessayer »), keeps one message per id
+  and per ref, and lets a waiting bubble go once Sauron shows its
+  message.
+- **Resumes gathered**: `resume/1` goes through
+  `SauronReporter.Support.Client.resume/2`, which gathers the users
+  asked within `resume_window` (100 ms) into `resume_many` calls of 200
+  at most. After a reconnection the panels ask within 250 ms (was 3 s),
+  and retry a refused resume after 0.5–2.5 s (was 1–5 s).
+- The fake Sauron of the tests speaks step 3: the team, refs, facts,
+  `resume_many`, per-user files, a reply held back to drop the link
+  under a call.
+
 ## 0.8.0 — 2026-10-23
 
 The support chat (Sauron plan 29, step 2): an app's signed-in users ask

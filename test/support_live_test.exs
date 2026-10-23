@@ -11,6 +11,7 @@ defmodule SauronReporter.SupportLiveTest.Page do
      assign(socket,
        user: Map.fetch!(@users, params["user"] || "42"),
        launcher: params["menu"] != "1",
+       team: if(params["team"] == "0", do: nil, else: "l'équipe m2"),
        path: nil
      )}
   end
@@ -36,7 +37,7 @@ defmodule SauronReporter.SupportLiveTest.Page do
       user={@user}
       org={%{id: 7, name: "Ville de Wattrelos"}}
       title="Assistance"
-      team="l'équipe m2"
+      team={@team}
       launcher={@launcher}
       page={@path}
     />
@@ -99,7 +100,7 @@ defmodule SauronReporter.SupportLiveTest do
     {:ok, view, _html} = live(build_conn(), path)
     panel = find_live_child(view, "sauron-support")
     # The first resume answered.
-    render_async(panel)
+    render_async(panel, 1_000)
     {view, panel}
   end
 
@@ -115,6 +116,14 @@ defmodule SauronReporter.SupportLiveTest do
   defp say(panel, text) do
     panel |> form("#sauron-support-composer", %{message: text}) |> render_submit()
     render_async(panel, 2_000)
+  end
+
+  defp drain do
+    receive do
+      {:fake_sauron, _, _} -> drain()
+    after
+      0 -> :ok
+    end
   end
 
   # What the panel shows once `text` is in it: Sauron's events arrive
@@ -163,7 +172,10 @@ defmodule SauronReporter.SupportLiveTest do
     assert html =~ ~s(aria-label="Fermer la demande")
     assert html =~ ~s(role="log")
 
-    assert_received {:fake_sauron, "open", %{"kind" => "live_chat", "page" => "/pages/1"}}
+    # The app's team, for Sauron's own lines.
+    assert_received {:fake_sauron, "open",
+                     %{"kind" => "live_chat", "page" => "/pages/1", "team" => "l'équipe m2"}}
+
     assert_receive {:fake_sauron, "presence", %{"present" => true, "page" => "/pages/1"}}
 
     id = current(panel)
@@ -211,11 +223,18 @@ defmodule SauronReporter.SupportLiveTest do
 
     html = say(panel, "Le modèle s'ouvre sans ses clauses.")
     assert html =~ "Le modèle s&#39;ouvre sans ses clauses."
-    assert html =~ "capture-bibliotheque.png"
     refute html =~ "Retirer capture-bibliotheque.png"
+
+    # The image itself, fetched by the panel's server for Camille.
+    html = shown(panel, ~s(class="aide-shot"))
+    assert html =~ ~s(alt="Image jointe : capture-bibliotheque.png")
+    assert html =~ ~s(src="data:image/png;base64,#{Base.encode64(@png)}")
+    refute html =~ FakeSauron.url()
 
     id = current(panel)
     messages = FakeSauron.conversation(id).messages
+    file_id = List.last(messages)["content"]["file_id"]
+    assert FakeSauron.fetches() == [{file_id, "42"}]
 
     assert %{
              "content" => %{
@@ -227,7 +246,10 @@ defmodule SauronReporter.SupportLiveTest do
 
     panel |> element("button", "Terminé — envoyer la demande") |> render_click()
     html = render_async(panel)
-    assert html =~ "C&#39;est envoyé à l&#39;équipe m2 : nous vous répondrons ici, ou par e-mail."
+
+    assert html =~
+             "C&#39;est envoyé à l&#39;équipe m2 : nous vous répondrons ici, ou par e-mail à camille@ville.fr."
+
     assert html =~ "Demande envoyée · réponse par e-mail"
     assert html =~ "Ajouter un détail à votre demande"
     refute html =~ "Terminé — envoyer la demande"
@@ -461,6 +483,162 @@ defmodule SauronReporter.SupportLiveTest do
 
     render_patch(view, "/pages/2?token=x")
     assert_receive {:fake_sauron, "presence", %{"present" => true, "page" => "/pages/2"}}, 1_000
+  end
+
+  test "the system's lines in the app's voice, from their facts — not Sauron's French" do
+    {_view, panel} = page()
+    open(panel)
+    choose(panel, "Parler à quelqu'un")
+    id = current(panel)
+
+    # Nobody claimed it: the name comes with the line.
+    FakeSauron.ask_screenshot(id)
+    html = shown(panel, "Plus tard")
+    assert html =~ "Thomas vous demande une capture d&#39;écran ·"
+    refute html =~ "vous demande une capture d&#39;écran."
+
+    FakeSauron.convert(id)
+    shown(panel, "Votre numéro, pour être rappelé")
+    panel |> form("#sauron-support-callback", %{phone: "06 39 98 42 17"}) |> render_submit()
+    render_async(panel)
+    FakeSauron.called(id)
+    html = shown(panel, "Thomas vous a appelé au 06 39 98 42 17 ·")
+    refute html =~ "vous a appelé."
+
+    FakeSauron.resolve(id)
+    html = shown(panel, "Thomas a clos cette demande ·")
+    refute html =~ "a clos cette demande."
+    assert html =~ "Cette demande est close."
+
+    # A code the panel does not know: Sauron's words, as they are.
+    FakeSauron.push("message", %{
+      "conversation_id" => id,
+      "user_id" => "42",
+      "message" => %{
+        "id" => Ecto.UUID.generate(),
+        "author" => %{"kind" => "system"},
+        "content" => %{"type" => "event", "code" => "nouveau", "text" => "Un mot de Sauron."},
+        "inserted_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+      }
+    })
+
+    shown(panel, "Un mot de Sauron.")
+  end
+
+  test "a request not retained says why, in the app's voice" do
+    {_view, panel} = page()
+    open(panel)
+    choose(panel, "J'ai une idée")
+    id = current(panel)
+
+    FakeSauron.reject(id, "Hors du périmètre de m2.")
+    html = shown(panel, "n&#39;a pas retenu votre demande")
+    assert html =~ "L&#39;équipe m2 n&#39;a pas retenu votre demande : Hors du périmètre de m2."
+    refute html =~ "n&#39;a pas été retenue"
+  end
+
+  test "a panel without a team says « l'équipe » and sends Sauron none" do
+    {_view, panel} = page("/pages/1?team=0")
+    assert open(panel) =~ "Vos messages sont lus par l&#39;équipe."
+    choose(panel, "J'ai une idée")
+    assert_received {:fake_sauron, "open", payload}
+    refute Map.has_key?(payload, "team")
+
+    {:ok, _} = Support.open(%{id: 42, name: "Camille"}, nil, :issue, team: "  ")
+    assert_received {:fake_sauron, "open", payload}
+    refute Map.has_key?(payload, "team")
+
+    {:ok, _} =
+      Support.open(%{id: 43, name: "Karim"}, nil, :issue, team: String.duplicate("é", 150))
+
+    assert_received {:fake_sauron, "open", %{"team" => team}}
+    assert String.length(team) == 100
+  end
+
+  @tag :tmp_dir
+  test "a PDF stays a chip, and so does an image past preview_max_size" do
+    Application.put_env(
+      :sauron_reporter,
+      :support,
+      Keyword.put(Support.config(), :preview_max_size, 10)
+    )
+
+    {_view, panel} = page()
+    open(panel)
+    choose(panel, "J'ai un problème")
+
+    panel
+    |> file_input("#sauron-support-composer", :files, [
+      %{name: "devis.pdf", content: "%PDF-1.7 test", type: "application/pdf"},
+      %{name: "grande.png", content: @png, type: "image/png"}
+    ])
+    |> tap(&render_upload(&1, "devis.pdf"))
+    |> render_upload("grande.png")
+
+    html = say(panel, "")
+    assert html =~ "devis.pdf"
+    assert html =~ "grande.png"
+    refute html =~ "aide-shot\""
+    refute html =~ "data:image"
+    assert FakeSauron.fetches() == []
+  end
+
+  test "a message in flight when the link drops is sent again, posted once" do
+    {_view, panel} = page()
+    open(panel)
+    choose(panel, "J'ai un problème")
+    id = current(panel)
+
+    FakeSauron.hold("message")
+
+    panel
+    |> form("#sauron-support-composer", %{message: "Une seule fois."})
+    |> render_submit()
+
+    assert_receive {:fake_sauron, "message", %{"ref" => ref}}, 1_000
+    FakeSauron.drop_connections()
+
+    html =
+      eventually(fn ->
+        html = render_async(panel, 2_000)
+        not (html =~ "Envoi…") && html
+      end)
+
+    refute html =~ "Non envoyé"
+    assert length(String.split(html, "Une seule fois.")) == 2
+
+    assert [%{"ref" => ^ref, "content" => %{"body" => "Une seule fois."}}] =
+             Enum.filter(FakeSauron.conversation(id).messages, &(&1["author"]["kind"] == "user"))
+
+    assert [^ref, ^ref] = for({"message", %{"ref" => r}} <- FakeSauron.calls(), do: r)
+  end
+
+  test "after a reconnection the node's panels resume in one resume_many" do
+    Application.put_env(
+      :sauron_reporter,
+      :support,
+      Keyword.put(Support.config(), :resume_window, 600)
+    )
+
+    {_view, camille} = page("/pages/1")
+    {_view, karim} = page("/pages/1?user=43")
+    open(camille)
+    choose(camille, "Parler à quelqu'un")
+    _ = current(camille)
+    calls_before = length(FakeSauron.calls())
+    drain()
+
+    FakeSauron.drop_connections()
+    assert_receive {:fake_sauron, "resume_many", %{"user_ids" => ids}}, 3_000
+    assert Enum.sort(ids) == ["42", "43"]
+
+    Process.sleep(200)
+    after_drop = Enum.drop(FakeSauron.calls(), calls_before)
+    assert [_] = for({"resume_many", _} = call <- after_drop, do: call)
+    assert for({"resume", _} = call <- after_drop, do: call) == []
+
+    assert render(camille) =~ "Nous cherchons quelqu&#39;un"
+    assert open(karim) =~ "Bonjour Karim"
   end
 
   test "the stylesheet takes every colour, face and radius from --aide-* variables" do

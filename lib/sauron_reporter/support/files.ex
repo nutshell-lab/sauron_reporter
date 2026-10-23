@@ -5,7 +5,11 @@ defmodule SauronReporter.Support.Files do
   the report token as a bearer — never from the browser. 10 MB at most;
   PNG, JPEG, GIF, WebP or PDF, which Sauron proves by the first bytes.
   The file then goes into the conversation with the channel's
-  `upload_done` (`SauronReporter.Support.upload_done/3`).
+  `upload_done` (`SauronReporter.Support.upload_done/4`).
+
+  `fetch/3` reads one back for a user (0.8.1): `GET /support/files/:id?user_id=…`,
+  which Sauron answers only when the file's conversation is that user's —
+  what the panel shows as an image preview.
   """
 
   @max_size 10_000_000
@@ -55,6 +59,79 @@ defmodule SauronReporter.Support.Files do
   rescue
     _ -> {:error, :unavailable}
   end
+
+  @image_types ~w(image/png image/jpeg image/gif image/webp)
+
+  @doc """
+  The file `file_id` of one of `user_id`'s conversations, from Sauron
+  (`GET /support/files/:id?user_id=…`, the token as a bearer): `{:ok,
+  %{content_type: type, body: binary}}` or `{:error, reason}` —
+  `:not_found` (no such file, or not that user's), `:too_large` (past
+  `max_size`), `:unsupported_type`, `:unauthorized`, `:disabled`,
+  `{:status, status}` or `:unavailable`. Never raises.
+
+  Options: `max_size` (bytes, default 10 MB: the body is read no
+  further), `types` (the content types taken, default the images).
+  """
+  def fetch(file_id, user_id, opts \\ []) do
+    reporter = Application.get_all_env(:sauron_reporter)
+    support = reporter[:support] || []
+    max = Keyword.get(opts, :max_size, @max_size)
+    types = Keyword.get(opts, :types, @image_types)
+
+    with true <- SauronReporter.Support.enabled?() || {:error, :disabled},
+         true <- (is_binary(file_id) and file_id != "") || {:error, :not_found},
+         user_id when is_binary(user_id) and user_id != "" <-
+           to_string(user_id || "") do
+      [
+        url:
+          String.trim_trailing(reporter[:url], "/") <>
+            "/support/files/" <> URI.encode(file_id, &URI.char_unreserved?/1),
+        params: [user_id: user_id],
+        auth: {:bearer, reporter[:token]},
+        decode_body: false,
+        compressed: false,
+        retry: false,
+        connect_options: [timeout: 5_000],
+        receive_timeout: 30_000,
+        into: &bounded(&1, &2, max)
+      ]
+      |> Keyword.merge(Keyword.drop(support[:req_options] || [], [:into, :decode_body]))
+      |> Req.get()
+      |> fetched(types)
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :not_found}
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  end
+
+  # The body read up to `max` bytes, no further.
+  defp bounded({:data, data}, {request, response}, max) do
+    if byte_size(response.body) + byte_size(data) > max,
+      do: {:halt, {request, Req.Response.put_private(response, :too_large, true)}},
+      else: {:cont, {request, %{response | body: response.body <> data}}}
+  end
+
+  defp fetched({:ok, %{private: %{too_large: true}}}, _types), do: {:error, :too_large}
+
+  defp fetched({:ok, %{status: 200} = response}, types) do
+    type =
+      response
+      |> Req.Response.get_header("content-type")
+      |> List.first("")
+      |> String.split(";")
+      |> hd()
+      |> String.trim()
+      |> String.downcase()
+
+    if type in types,
+      do: {:ok, %{content_type: type, body: response.body}},
+      else: {:error, :unsupported_type}
+  end
+
+  defp fetched(response, _types), do: answer(response)
 
   defp answer({:ok, %{status: 201, body: %{"file" => file}}}), do: {:ok, file}
   defp answer({:ok, %{status: 401}}), do: {:error, :unauthorized}

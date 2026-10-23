@@ -34,6 +34,8 @@ defmodule SauronReporter.Support do
           call_timeout: 10_000,      # ms a pushed call waits for Sauron's reply
           buffer_ttl: 30_000,        # ms a call waits for the link while it is down
           max_buffer: 500,           # calls held while the link is down; beyond, refused
+          resume_window: 100,        # ms the resumes are gathered into one resume_many
+          preview_max_size: 3_000_000,  # bytes of an image the panel shows; 0: chips only
           reconnect_after_msec: [100, 500, 1_000, 2_000, 5_000, 10_000, 30_000],
           rejoin_after_msec: [500, 1_000, 2_000, 5_000, 10_000, 30_000],
           slipstream: [],            # mint_opts (TLS), heartbeat_interval_msec
@@ -140,42 +142,74 @@ defmodule SauronReporter.Support do
   The user asks: `kind` is `:issue`, `:feature` or `:live_chat`; `user`
   a map or struct with `id`, `name`, `email`; `org` one with `id` and
   `name`, or `nil`. Options: `body` (a first message), `page` (where the
-  user is). `{:ok, thread}` — `%{"conversation", "request", "modules",
-  "messages", "resumed"?}`; a live chat the user already has open comes
-  back rather than a second one.
+  user is), `team` (who answers, « l'équipe m2 »: Sauron's own lines of
+  the conversation say it; 100 characters at most). `{:ok, thread}` —
+  `%{"conversation", "request", "modules", "messages", "resumed"?}`; a
+  live chat the user already has open comes back rather than a second
+  one.
   """
   def open(user, org, kind, opts \\ []) when kind in [:issue, :feature, :live_chat] do
     payload =
       %{"kind" => Atom.to_string(kind), "user" => user_params(user), "org" => org_params(org)}
       |> put_present("body", opts[:body])
       |> put_present("page", page(opts[:page]))
+      |> put_present("team", team(opts[:team]))
 
     Client.call("open", payload)
   end
 
-  @doc "The user writes: `{:ok, %{\"message\" => message}}`."
-  def send_message(conversation_id, body),
-    do: Client.call("message", %{"conversation_id" => conversation_id, "body" => body})
+  @doc """
+  The user writes: `{:ok, %{"message" => message}}`. Option `ref`, the
+  app's key for this message (`new_ref/0` when not given): asked again
+  with the same ref — a retry — Sauron answers the message it first
+  posted, posted once. A call in flight when the link drops is pushed
+  again for that reason.
+  """
+  def send_message(conversation_id, body, opts \\ []) do
+    Client.call("message", %{
+      "conversation_id" => conversation_id,
+      "body" => body,
+      "ref" => ref(opts)
+    })
+  end
 
-  @doc "A file uploaded to Sauron's files API (`upload/4`) given to the conversation: `{:ok, %{\"message\" => message}}`."
-  def upload_done(conversation_id, file_id, caption \\ nil) do
+  @doc """
+  A file uploaded to Sauron's files API (`upload/4`) given to the
+  conversation: `{:ok, %{"message" => message}}`. Option `ref`, as
+  `send_message/3`.
+  """
+  def upload_done(conversation_id, file_id, caption \\ nil, opts \\ []) do
     Client.call(
       "upload_done",
-      put_present(
-        %{"conversation_id" => conversation_id, "file_id" => file_id},
-        "caption",
-        caption
-      )
+      %{"conversation_id" => conversation_id, "file_id" => file_id, "ref" => ref(opts)}
+      |> put_present("caption", caption)
     )
   end
 
   @doc "Uploads a file to Sauron for `conversation_id` (`SauronReporter.Support.Files.upload/4`)."
   defdelegate upload(conversation_id, path, name, content_type \\ nil), to: Files
 
-  @doc "`upload/4` then `upload_done/3`: `{:ok, %{\"message\" => message}}`."
-  def attach(conversation_id, path, name, content_type \\ nil, caption \\ nil) do
+  @doc "`upload/4` then `upload_done/4`: `{:ok, %{\"message\" => message}}`. Option `ref`."
+  def attach(conversation_id, path, name, content_type \\ nil, caption \\ nil, opts \\ []) do
     with {:ok, %{"id" => file_id}} <- upload(conversation_id, path, name, content_type) do
-      upload_done(conversation_id, file_id, caption)
+      upload_done(conversation_id, file_id, caption, opts)
+    end
+  end
+
+  @doc """
+  An image of `user_id`'s conversations, fetched from Sauron for that
+  user only (`SauronReporter.Support.Files.fetch/3`): `{:ok, %{content_type:,
+  body:}}`. What the panel shows; the browser never asks Sauron.
+  """
+  defdelegate fetch_file(file_id, user_id, opts \\ []), to: Files, as: :fetch
+
+  @doc "A new key for a message (`send_message/3`'s `ref`): 22 random URL-safe characters."
+  def new_ref, do: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+
+  defp ref(opts) do
+    case opts[:ref] do
+      ref when is_binary(ref) and ref != "" -> String.slice(ref, 0, 100)
+      _ -> new_ref()
     end
   end
 
@@ -206,10 +240,13 @@ defmodule SauronReporter.Support do
   def callback(conversation_id, phone),
     do: Client.call("callback", %{"conversation_id" => conversation_id, "phone" => phone})
 
-  @doc "The user's requests not over yet, the newest first: `{:ok, [thread]}`."
+  @doc """
+  The user's requests not over yet, the newest first: `{:ok, [thread]}`.
+  The users asked within a few milliseconds on this node go to Sauron
+  in one `resume_many` call (`SauronReporter.Support.Client.resume/2`).
+  """
   def resume(user_id) do
-    with {:ok, %{"threads" => threads}} <-
-           Client.call("resume", %{"user_id" => to_string(user_id)}),
+    with {:ok, %{"threads" => threads}} when is_list(threads) <- Client.resume(user_id),
          do: {:ok, threads}
   end
 
@@ -268,6 +305,16 @@ defmodule SauronReporter.Support do
     _ -> nil
   end
 
+  # Who answers, as Sauron keeps it: 100 characters at most.
+  defp team(team) when is_binary(team) do
+    case String.trim(team) do
+      "" -> nil
+      team -> String.slice(team, 0, 100)
+    end
+  end
+
+  defp team(_), do: nil
+
   # The page as analytics sends a path: no query, no secret.
   defp page(nil), do: nil
   defp page(page) when is_binary(page), do: SauronReporter.Analytics.path(page)
@@ -312,8 +359,9 @@ defmodule SauronReporter.Support do
   attr(:title, :string, default: "Aide", doc: "the panel's title, the launcher's word")
 
   attr(:team, :string,
-    default: "l'équipe",
-    doc: "who answers, as the copy says it: « l'équipe m2 »"
+    default: nil,
+    doc:
+      "who answers, as the copy says it: « l'équipe m2 » (default « l'équipe »); sent to Sauron, whose own lines then say it"
   )
 
   attr(:launcher, :boolean,

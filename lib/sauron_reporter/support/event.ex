@@ -10,8 +10,12 @@ defmodule SauronReporter.Support.Event do
     * `conversation_id`, `user_id` — whose it is (the app's user id, as
       the app gave it to `SauronReporter.Support.open/4`);
     * `payload` — Sauron's map as it came (string keys): `message`,
-      `operator`, `typing`, `modules`, `request`, `reason`, `by`… See
-      Sauron's `SauronWeb.SupportChannel`.
+      `operator`, `typing`, `modules`, `request`, `reason`, `by`… A
+      system message's content carries, beside its `code` and `text`,
+      the facts to word it (Sauron's step 3): `operator` `{id, name}`
+      (the first name), `phone`, `email`, `reason`, each where it
+      applies; a user's message its `ref`. See Sauron's
+      `SauronWeb.SupportChannel`.
   """
 
   @type t :: %__MODULE__{

@@ -111,7 +111,7 @@ SauronReporter.Analytics.track(conn, "signup", %{plan: "pro"})
 
 Every option is in `SauronReporter.Analytics`'s moduledoc.
 
-## Support chat (0.8.0)
+## Support chat (0.8.0, 0.8.1)
 
 Sauron's plan 29: a signed-in user reports a problem, proposes an idea
 or speaks to somebody now — « J'ai une idée », « J'ai un problème »,
@@ -137,7 +137,9 @@ to `wss://<SAURON_URL>/support/socket/websocket` and posts files to
 `/support/files`; on Sauron's side those paths must be open to the
 app's server (infra: the sauron release's `private_paths`, plan 31).
 Options (`socket_url`, `call_timeout`, `buffer_ttl`, `max_buffer`,
-backoffs, `req_options`) are in `SauronReporter.Support`'s moduledoc.
+`resume_window`, `preview_max_size`, backoffs, `req_options`) are in
+`SauronReporter.Support`'s moduledoc. 0.8.1 needs a Sauron with plan
+29's step 3 (`resume_many`, `?user_id=` on the files, a message's `ref`).
 
 ### Mounting it
 
@@ -162,7 +164,7 @@ it is a sticky LiveView that survives live navigation:
 | `user` | — | `id`, `name` (or `first_name`/`last_name`), `email` — what Sauron shows and answers by email |
 | `org` | `nil` | the user's organisation in the app: `id`, `name` |
 | `title` | `"Aide"` | the panel's title and the launcher's word: « Assistance », « Aide » |
-| `team` | `"l'équipe"` | who answers, as the copy says it: « l'équipe m2 », « l'équipe Nutshell » |
+| `team` | `nil` (« l'équipe ») | who answers, as the copy says it: « l'équipe m2 », « l'équipe Nutshell »; sent to Sauron with `open` (0.8.1), whose own lines — emails, the operators' pages — then say it too |
 | `launcher` | `true` | the bottom-right launcher; `false` when the app opens the panel from its own menu |
 | `page` | `nil` | where the user is (a path; no query, secrets masked as analytics does) |
 | `note`, `idea_hint` | | the start's footnote and the line under « J'ai une idée » |
@@ -241,9 +243,20 @@ stays).
   minutes: an email answer, and « Rappelez-moi » with a phone number.
 - **A screenshot asked**: a banner — « Capturer cet écran » where the
   browser can, « Choisir une image », « Plus tard ».
-- **The system's lines** speak in the app's voice: the team the app
-  names, the user's email, the operator's first name — not Sauron's
-  « l'équipe Nutshell ».
+- **Images shown** (0.8.1): the panel's server fetches each image of
+  the conversation from Sauron for its user (`GET
+  /support/files/:id?user_id=…`, which Sauron answers only when the
+  file's conversation is that user's) and renders it as a `data:` URL
+  in a LiveComponent (`SauronReporter.Support.Preview`), so it crosses
+  the socket once. No route to mount; the browser never sees Sauron's
+  URL or token. Up to `preview_max_size` (3 MB; `0` turns previews
+  off), else — and for PDFs — a chip. An app with a
+  Content-Security-Policy allows `img-src data:`.
+- **The system's lines** speak in the app's voice, every one of them
+  (0.8.1): worded by the panel from the facts Sauron sends with each
+  line — the operator's first name, the phone, the user's email, a
+  rejection's reason — and the team the app names. Sauron's French is
+  shown only for a code the panel does not know.
 - **Accessible**: real buttons, labels and inputs; the panel is a
   dialog, focused on opening (the first choice, or the message field),
   Escape and « Réduire » close it and give the focus back; new messages
@@ -254,18 +267,28 @@ stays).
 
 ### The link
 
-- **Calls** (`SauronReporter.Support.open/4`, `send_message/2`,
-  `upload_done/3`, `attach/5`, `submit/1`, `close/1`, `callback/2`,
-  `resume/1`, `history/2`) answer `{:ok, map} | {:error, reason}`;
+- **Calls** (`SauronReporter.Support.open/4`, `send_message/3`,
+  `upload_done/4`, `attach/6`, `submit/1`, `close/1`, `callback/2`,
+  `resume/1`, `history/2`, `fetch_file/3`) answer `{:ok, map} | {:error, reason}`;
   `typing/2`, `read/1`, `present/2`, `absent/1` are fire-and-forget.
 - **While the link is down** a call waits in a buffer (500 at most,
   each 30 s at most) and is pushed in order once the channel is joined
   again; past its time it answers `{:error, :disconnected}`, beyond the
-  bound `{:error, :buffer_full}`. A call in flight when the link drops
-  answers `{:error, :disconnected}` and is never pushed twice; the panel
-  shows it « Non envoyé » with « Réessayer ». Typing and reads are
-  dropped. Presence is said again after each reconnection, and the
-  panel catches up with what happened meanwhile (`resume`).
+  bound `{:error, :buffer_full}`. Typing and reads are dropped.
+  Presence is said again after each reconnection.
+- **A call in flight when the link drops** (0.8.1): a message or an
+  upload carries a `ref` (`send_message/3`, `upload_done/4`: the app's
+  own, or one made for it), and Sauron answers the same ref with the
+  message it first posted — so the call goes back to the buffer and is
+  pushed again once joined, posted once; the panel shows « Non envoyé »
+  only when its buffer time runs out. `resume` and `history` are pushed
+  again too. Any other call (`open`, `submit`, `close`, `callback`)
+  answers `{:error, :disconnected}` and is never pushed twice.
+- **Resumes are gathered** (0.8.1): the users asked within
+  `resume_window` (100 ms) go to Sauron in one `resume_many` call, 200
+  at most each. After a reconnection every panel of the node catches up
+  (within 250 ms of each other) in a call or a few, not one each —
+  Sauron limits the app's socket to 100 calls at once.
 - **Reconnects** with backoff, 100 ms up to 30 s.
 - **Events** go on the app's PubSub, on this node only
   (`local_broadcast`: every node's client hears every event):
@@ -276,9 +299,8 @@ stays).
 - Telemetry: `[:sauron_reporter, :support, :connected | :disconnected
   | :dropped]`.
 
-Not in 0.8.0: images are shown as file chips, not previews (the browser
-never fetches Sauron's files); whether an operator is online is not
-known, so the header shows who joined, not « en ligne ».
+Not yet: whether an operator is online is not known, so the header
+shows who joined, not « en ligne ».
 
 ## Our own people are not counted (0.6.0)
 

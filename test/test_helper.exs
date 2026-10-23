@@ -138,7 +138,8 @@ defmodule SauronReporter.SupportCase do
       reconnect_after_msec: [20, 50, 100],
       rejoin_after_msec: [20, 50, 100],
       call_timeout: 2_000,
-      buffer_ttl: 5_000
+      buffer_ttl: 5_000,
+      resume_window: 20
     )
 
     restart_client()

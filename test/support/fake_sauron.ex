@@ -1,11 +1,12 @@
 defmodule SauronReporter.FakeSauron do
   @moduledoc """
-  Sauron's side of the support (plan 29, step 1) for the tests: a real
-  Phoenix endpoint on a free port, its socket at `/support/socket`
+  Sauron's side of the support (plan 29, steps 1 and 3) for the tests: a
+  real Phoenix endpoint on a free port, its socket at `/support/socket`
   (the `x-sauron-token` header, the channel `support:<app>` and its
-  calls, as `SauronWeb.SupportChannel` answers them) and its files API
-  (`POST /support/files`). Its state lives in an Agent; the functions
-  below play the operators.
+  calls, as `SauronWeb.SupportChannel` answers them — the app's `team`,
+  a message's `ref`, `resume_many`, the system lines' facts) and its
+  files API (`POST /support/files`, `GET /support/files/:id?user_id=`).
+  Its state lives in an Agent; the functions below play the operators.
   """
 
   use Agent
@@ -23,7 +24,16 @@ defmodule SauronReporter.FakeSauron do
   end
 
   defp initial,
-    do: %{conversations: %{}, files: %{}, calls: [], accepting: true, test_pid: nil}
+    do: %{
+      conversations: %{},
+      files: %{},
+      blobs: %{},
+      calls: [],
+      accepting: true,
+      test_pid: nil,
+      hold: [],
+      fetches: []
+    }
 
   def reset(test_pid \\ self()) do
     Agent.update(__MODULE__, fn _ -> %{initial() | test_pid: test_pid} end)
@@ -46,6 +56,15 @@ defmodule SauronReporter.FakeSauron do
   @doc "The calls received, in order: `{event, payload}`."
   def calls, do: Agent.get(__MODULE__, &Enum.reverse(&1.calls))
 
+  @doc """
+  The next `event` call is handled — posted, recorded — but its reply
+  never sent: as if the link fell before it came back.
+  """
+  def hold(event), do: Agent.update(__MODULE__, &%{&1 | hold: [event | &1.hold]})
+
+  @doc "The files fetched through `GET /support/files/:id`: `{file_id, user_id}`, in order."
+  def fetches, do: Agent.get(__MODULE__, &Enum.reverse(&1.fetches))
+
   def conversation(id), do: Agent.get(__MODULE__, fn state -> state.conversations[id] end)
 
   # ---------- the channel's calls ----------
@@ -56,7 +75,10 @@ defmodule SauronReporter.FakeSauron do
       state = %{state | calls: [{event, payload} | state.calls]}
       if state.test_pid, do: send(state.test_pid, {:fake_sauron, event, payload})
       {reply, state, events} = call(event, payload, state)
-      {{reply, events}, state}
+
+      if event in state.hold,
+        do: {{:held, events}, %{state | hold: List.delete(state.hold, event)}},
+        else: {{reply, events}, state}
     end)
     |> then(fn {reply, events} ->
       Enum.each(events, fn {event, payload} ->
@@ -86,6 +108,7 @@ defmodule SauronReporter.FakeSauron do
         id: id,
         user: user,
         org: payload["org"],
+        team: payload["team"] || "l'équipe Nutshell",
         inserted_at: now,
         modules:
           if(kind == "live_chat", do: ~w(text upload callback), else: ~w(text upload submit)),
@@ -106,7 +129,8 @@ defmodule SauronReporter.FakeSauron do
       greeting =
         case kind do
           "live_chat" ->
-            {"searching", "Nous cherchons quelqu'un de l'équipe Nutshell pour vous répondre…"}
+            {"searching",
+             "Nous cherchons quelqu'un de #{payload["team"] || "l'équipe Nutshell"} pour vous répondre…"}
 
           "issue" ->
             {"describe_issue", "Décrivez le problème."}
@@ -127,17 +151,26 @@ defmodule SauronReporter.FakeSauron do
     end
   end
 
-  defp call("message", %{"conversation_id" => id, "body" => body}, state) do
+  defp call("message", %{"conversation_id" => id, "body" => body} = payload, state) do
     with_live(state, id, fn conversation ->
-      message = user_message(conversation, text(body))
-      {{:ok, %{"message" => message}}, add(conversation, message), []}
+      case sent_before(conversation, payload["ref"]) do
+        nil ->
+          message = user_message(conversation, text(body), payload["ref"])
+          {{:ok, %{"message" => message}}, add(conversation, message), []}
+
+        message ->
+          {{:ok, %{"message" => message}}, conversation, []}
+      end
     end)
   end
 
   defp call("upload_done", %{"conversation_id" => id, "file_id" => file_id} = payload, state) do
     with_live(state, id, fn conversation ->
-      case state.files[file_id] do
-        %{conversation_id: ^id} = file ->
+      case {sent_before(conversation, payload["ref"]), state.files[file_id]} do
+        {%{} = message, _file} ->
+          {{:ok, %{"message" => message}}, conversation, []}
+
+        {nil, %{conversation_id: ^id} = file} ->
           type = if String.starts_with?(file.content_type, "image/"), do: "image", else: "file"
 
           content = %{
@@ -149,7 +182,7 @@ defmodule SauronReporter.FakeSauron do
             "caption" => payload["caption"]
           }
 
-          message = user_message(conversation, content)
+          message = user_message(conversation, content, payload["ref"])
           conversation = add(conversation, message)
 
           {conversation, events} =
@@ -175,7 +208,11 @@ defmodule SauronReporter.FakeSauron do
   defp call("submit", %{"conversation_id" => id}, state) do
     with_live(state, id, fn conversation ->
       conversation = put_in(conversation, [:request, "submitted_at"], now())
-      line = system(id, {"submitted", "C'est envoyé à l'équipe Nutshell."})
+
+      line =
+        system(id, {"submitted", "C'est envoyé à #{conversation.team}."}, %{
+          "email" => conversation.user["email"]
+        })
 
       {conversation, module_events} =
         modules(conversation, List.delete(conversation.modules, "submit"))
@@ -204,7 +241,11 @@ defmodule SauronReporter.FakeSauron do
   defp call("callback", %{"conversation_id" => id, "phone" => phone}, state) do
     with_live(state, id, fn conversation ->
       conversation = put_in(conversation, [:request, "callback_phone"], phone)
-      line = system(id, {"callback_requested", "Nous vous rappellerons au #{phone}."})
+
+      line =
+        system(id, {"callback_requested", "Nous vous rappellerons au #{phone}."}, %{
+          "phone" => phone
+        })
 
       {conversation, module_events} =
         modules(conversation, List.delete(conversation.modules, "callback"))
@@ -227,6 +268,28 @@ defmodule SauronReporter.FakeSauron do
 
     {{:ok, %{"threads" => threads}}, state, []}
   end
+
+  defp call("resume_many", %{"user_ids" => ids}, state)
+       when is_list(ids) and length(ids) <= 200 do
+    threads =
+      Map.new(ids, fn user_id ->
+        threads =
+          state.conversations
+          |> Map.values()
+          |> Enum.filter(
+            &(&1.user["id"] == user_id and &1.request["state"] in ["open", "claimed"])
+          )
+          |> Enum.sort_by(& &1.inserted_at, :desc)
+          |> Enum.map(&thread/1)
+
+        {user_id, threads}
+      end)
+
+    {{:ok, %{"threads" => threads}}, state, []}
+  end
+
+  defp call("resume_many", %{"user_ids" => ids}, state) when is_list(ids),
+    do: {{:error, %{reason: "invalid", detail: "user_ids: at most 200"}}, state, []}
 
   defp call("history", %{"conversation_id" => id} = payload, state) do
     case state.conversations[id] do
@@ -283,7 +346,11 @@ defmodule SauronReporter.FakeSauron do
             |> put_in([:request, "claimed_by"], op)
 
           line =
-            system(id, {"claimed", "#{name}, de l'équipe Nutshell, a rejoint la conversation."})
+            system(
+              id,
+              {"claimed", "#{first(name)}, de #{conversation.team}, a rejoint la conversation."},
+              %{"operator" => %{"id" => "op-1", "name" => first(name)}}
+            )
 
           {add(conversation, line),
            [
@@ -314,7 +381,11 @@ defmodule SauronReporter.FakeSauron do
         |> put_in([:request, "kind"], "issue")
         |> put_in([:request, "was_live_chat"], true)
 
-      line = system(id, {"no_operator", "Personne n'est disponible pour l'instant."})
+      line =
+        system(id, {"no_operator", "Personne n'est disponible pour l'instant."}, %{
+          "email" => conversation.user["email"]
+        })
+
       conversation = add(conversation, line)
 
       {conversation,
@@ -326,7 +397,13 @@ defmodule SauronReporter.FakeSauron do
   def ask_screenshot(id, name \\ "Thomas Martin") do
     operator(id, fn conversation ->
       op = %{"id" => "op-1", "name" => name}
-      line = system(id, {"screenshot_asked", "#{name} vous demande une capture d'écran."})
+
+      line =
+        system(
+          id,
+          {"screenshot_asked", "#{first(name)} vous demande une capture d'écran."},
+          %{"operator" => %{"id" => "op-1", "name" => first(name)}}
+        )
 
       {conversation, module_events} =
         modules(conversation, Enum.uniq(conversation.modules ++ ["screenshot"]))
@@ -335,6 +412,70 @@ defmodule SauronReporter.FakeSauron do
 
       {conversation,
        [request_event(conversation, "screenshot_asked", %{"operator" => op})] ++
+         module_events ++ [message_event(conversation, line)]}
+    end)
+  end
+
+  @doc "An operator called the user back."
+  def called(id, name \\ "Thomas Martin") do
+    operator(id, fn conversation ->
+      op = %{"id" => "op-1", "name" => first(name)}
+      phone = conversation.request["callback_phone"]
+      conversation = put_in(conversation, [:request, "called_at"], now())
+
+      line =
+        system(id, {"called", "#{first(name)} vous a appelé."}, %{
+          "operator" => op,
+          "phone" => phone
+        })
+
+      conversation = add(conversation, line)
+
+      {conversation,
+       [
+         request_event(conversation, "called", %{"operator" => op}),
+         message_event(conversation, line)
+       ]}
+    end)
+  end
+
+  @doc "An operator closes the request: resolved."
+  def resolve(id, name \\ "Thomas Martin") do
+    operator(id, fn conversation ->
+      conversation =
+        conversation
+        |> put_in([:request, "state"], "closed")
+        |> put_in([:request, "closed_by"], "operator")
+
+      line =
+        system(id, {"resolved", "#{first(name)} a clos cette demande."}, %{
+          "operator" => %{"id" => "op-1", "name" => first(name)}
+        })
+
+      {conversation, module_events} = modules(conversation, [])
+      conversation = add(conversation, line)
+
+      {conversation,
+       [request_event(conversation, "closed", %{"by" => "operator"})] ++
+         module_events ++ [message_event(conversation, line)]}
+    end)
+  end
+
+  @doc "An operator rejects the request, with a reason."
+  def reject(id, reason) do
+    operator(id, fn conversation ->
+      conversation = put_in(conversation, [:request, "state"], "rejected")
+
+      line =
+        system(id, {"rejected", "Votre demande n'a pas été retenue : #{reason}"}, %{
+          "reason" => reason
+        })
+
+      {conversation, module_events} = modules(conversation, [])
+      conversation = add(conversation, line)
+
+      {conversation,
+       [request_event(conversation, "rejected", %{"reason" => reason})] ++
          module_events ++ [message_event(conversation, line)]}
     end)
   end
@@ -396,7 +537,24 @@ defmodule SauronReporter.FakeSauron do
             size: byte_size(body)
           }
 
-          {{:ok, file}, put_in(state, [:files, file.id], file)}
+          state = state |> put_in([:files, file.id], file) |> put_in([:blobs, file.id], body)
+          {{:ok, file}, state}
+      end
+    end)
+  end
+
+  @doc false
+  # `GET /support/files/:id?user_id=`: only a file of that user's conversations.
+  def read_file(file_id, user_id) do
+    Agent.get_and_update(__MODULE__, fn state ->
+      state = %{state | fetches: [{file_id, user_id} | state.fetches]}
+
+      with %{conversation_id: cid} = file <- state.files[file_id],
+           %{user: user} <- state.conversations[cid],
+           true <- is_nil(user_id) or user["id"] == user_id do
+        {{:ok, file, state.blobs[file_id]}, state}
+      else
+        _ -> {:error, state}
       end
     end)
   end
@@ -429,17 +587,20 @@ defmodule SauronReporter.FakeSauron do
     end
   end
 
-  defp system(id, {code, text}) do
+  # A system line: its code, Sauron's French, the facts that apply.
+  defp system(id, {code, text}, facts \\ %{}) do
+    facts = for {k, v} <- facts, not is_nil(v), into: %{}, do: {k, v}
+
     %{
       "id" => Ecto.UUID.generate(),
       "conversation_id" => id,
       "author" => %{"kind" => "system"},
-      "content" => %{"type" => "event", "code" => code, "text" => text},
+      "content" => Map.merge(facts, %{"type" => "event", "code" => code, "text" => text}),
       "inserted_at" => now()
     }
   end
 
-  defp user_message(conversation, content) do
+  defp user_message(conversation, content, ref \\ nil) do
     %{
       "id" => Ecto.UUID.generate(),
       "conversation_id" => conversation.id,
@@ -447,7 +608,14 @@ defmodule SauronReporter.FakeSauron do
       "content" => content,
       "inserted_at" => now()
     }
+    |> then(&if(is_binary(ref), do: Map.put(&1, "ref", ref), else: &1))
   end
+
+  # The message a ref first posted in this conversation.
+  defp sent_before(_conversation, ref) when not is_binary(ref), do: nil
+  defp sent_before(conversation, ref), do: Enum.find(conversation.messages, &(&1["ref"] == ref))
+
+  defp first(name), do: name |> String.split(" ") |> hd()
 
   defp text(body), do: %{"type" => "text", "body" => body}
 
@@ -495,7 +663,10 @@ defmodule SauronReporter.FakeSauron.Channel do
 
   @impl true
   def handle_in(event, payload, socket) do
-    {:reply, SauronReporter.FakeSauron.handle(event, payload), socket}
+    case SauronReporter.FakeSauron.handle(event, payload) do
+      :held -> {:noreply, socket}
+      reply -> {:reply, reply, socket}
+    end
   end
 end
 
@@ -526,6 +697,25 @@ defmodule SauronReporter.FakeSauron.Files do
 
         {:error, status} ->
           conn |> send_resp(status, "no") |> halt()
+      end
+    end
+  end
+
+  def call(%{method: "GET", path_info: ["support", "files", id]} = conn, _opts) do
+    conn = fetch_query_params(conn)
+
+    if get_req_header(conn, "authorization") != ["Bearer " <> SauronReporter.FakeSauron.token()] do
+      conn |> send_resp(401, "unknown token") |> halt()
+    else
+      case SauronReporter.FakeSauron.read_file(id, conn.query_params["user_id"]) do
+        {:ok, file, body} ->
+          conn
+          |> put_resp_content_type(file.content_type, nil)
+          |> send_resp(200, body)
+          |> halt()
+
+        :error ->
+          conn |> send_resp(404, "no such file") |> halt()
       end
     end
   end

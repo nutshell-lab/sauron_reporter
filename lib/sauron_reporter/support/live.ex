@@ -25,6 +25,14 @@ defmodule SauronReporter.Support.Live do
   It tells the page's LiveView its unread count through
   `SauronReporter.Support.Hook` (`@sauron_support_unread`), and learns
   the page the user is on from it.
+
+  Since 0.8.1: every system line is worded here from the facts Sauron
+  sends with it (`SauronReporter.Support.Copy`); the team the app named
+  goes to Sauron with `open`; each message the user sends has its own
+  `ref`, so a retry — the client's after a reconnection, or
+  « Réessayer » — posts it once, and the panel keeps one bubble per id
+  and per ref; images are shown (`SauronReporter.Support.Preview`),
+  PDFs stay chips.
   """
 
   use Phoenix.LiveView
@@ -49,6 +57,8 @@ defmodule SauronReporter.Support.Live do
         org: session["org"],
         title: session["title"] || "Aide",
         team: session["team"] || "l'équipe",
+        # Sent to Sauron only when the app named it.
+        named_team: session["team"],
         launcher: session["launcher"] != false,
         page: session["page"],
         note: session["note"],
@@ -284,7 +294,7 @@ defmodule SauronReporter.Support.Live do
                 <p class="aide-info">{text}</p>
               <% {:bubble, style, body} -> %>
                 <div class={["aide-b", "aide-#{style}"]}>
-                  <.body body={body} />
+                  <.body body={body} user_id={@user["id"]} />
                 </div>
             <% end %>
           <% end %>
@@ -332,7 +342,7 @@ defmodule SauronReporter.Support.Live do
 
     <div :if={"screenshot" in @modules and not @later and not @over} class="aide-req" role="status">
       <p>
-        <.camera_icon />{screenshot_line(@request)}
+        <.camera_icon />{screenshot_line(@thread)}
       </p>
       <div class="aide-row">
         <button
@@ -464,6 +474,7 @@ defmodule SauronReporter.Support.Live do
   end
 
   attr(:body, :any, required: true)
+  attr(:user_id, :string, default: nil)
 
   defp body(%{body: {:text, text}} = assigns) do
     assigns = assign(assigns, :paragraphs, String.split(text || "", ~r/\n\s*\n/, trim: true))
@@ -488,6 +499,21 @@ defmodule SauronReporter.Support.Live do
     <p>
       <span :if={@searching?} class="aide-dots" aria-hidden="true"><i></i><i></i><i></i></span>{@text}
     </p>
+    """
+  end
+
+  # An image, fetched for the user by the panel's server.
+  defp body(%{body: {:image, file}} = assigns) do
+    assigns = assign(assigns, :file, file)
+
+    ~H"""
+    <p :if={@file["caption"]}>{@file["caption"]}</p>
+    <.live_component
+      module={SauronReporter.Support.Preview}
+      id={"aide-img-#{@file["file_id"]}"}
+      file={@file}
+      user_id={@user_id}
+    />
     """
   end
 
@@ -617,6 +643,9 @@ defmodule SauronReporter.Support.Live do
     end
   end
 
+  defp content(%{"type" => "image", "file_id" => id} = file) when is_binary(id),
+    do: {:image, file}
+
   defp content(%{"type" => type} = file) when type in ["image", "file"], do: {:file, file}
   defp content(%{"body" => body}), do: {:text, body}
   defp content(_), do: {:text, ""}
@@ -686,8 +715,21 @@ defmodule SauronReporter.Support.Live do
     end
   end
 
-  defp screenshot_line(request) do
-    case Copy.operator_name(request) do
+  # Who asked: the last request's operator, else the one who claimed.
+  defp screenshot_line(thread) do
+    asked =
+      (thread["messages"] || [])
+      |> Enum.reverse()
+      |> Enum.find_value(fn
+        %{"content" => %{"code" => "screenshot_asked", "operator" => %{"name" => name}}}
+        when is_binary(name) ->
+          name
+
+        _ ->
+          nil
+      end)
+
+    case asked || Copy.operator_name(thread["request"]) do
       nil -> "On vous demande une capture d'écran"
       name -> "#{Copy.first_name(name)} vous demande une capture d'écran"
     end
@@ -778,13 +820,13 @@ defmodule SauronReporter.Support.Live do
     if socket.assigns.busy == :open do
       {:noreply, socket}
     else
-      %{user: user, org: org, page: page} = socket.assigns
+      %{user: user, org: org, page: page, named_team: team} = socket.assigns
       kind = Map.fetch!(@kinds, kind)
 
       {:noreply,
        socket
        |> assign(busy: :open, notice: nil)
-       |> start_async(:open, fn -> Support.open(user, org, kind, page: page) end)}
+       |> start_async(:open, fn -> Support.open(user, org, kind, page: page, team: team) end)}
     end
   end
 
@@ -932,12 +974,12 @@ defmodule SauronReporter.Support.Live do
     {:noreply, socket |> present_all() |> tick()}
   end
 
-  # Sauron limits the calls of the app's one socket: after a restart or
-  # a reconnection every panel asks at once. Asked again, later, a few
-  # times.
+  # Sauron limits the calls of the app's one socket; the client gathers
+  # the panels' resumes, but one may still be refused. Asked again,
+  # later, a few times.
   def handle_async(:resume, {:ok, {:error, reason}}, socket)
       when reason in [:rate_limited, :timeout, :disconnected] and socket.assigns.resumes < 5 do
-    Process.send_after(self(), :resume, 1_000 + :rand.uniform(4_000))
+    Process.send_after(self(), :resume, 500 + :rand.uniform(2_000))
     {:noreply, assign(socket, :resumes, socket.assigns.resumes + 1)}
   end
 
@@ -1001,8 +1043,9 @@ defmodule SauronReporter.Support.Live do
     socket = assign(socket, :link, status)
 
     # Back: what happened meanwhile, from Sauron — every panel of the
-    # node hears it at once, so each asks within a few seconds.
-    if status == :up, do: Process.send_after(self(), :resume, :rand.uniform(3_000))
+    # node hears it at once.
+    # The client gathers them into `resume_many` calls: a short spread.
+    if status == :up, do: Process.send_after(self(), :resume, :rand.uniform(250))
     {:noreply, socket}
   end
 
@@ -1159,19 +1202,15 @@ defmodule SauronReporter.Support.Live do
     end
   end
 
+  # Each message the user sends has its own key, Sauron's `ref`: a retry
+  # — the client's after a reconnection, or « Réessayer » — posts it once.
   defp send_text(socket, cid, body) do
-    run(socket, %{
-      ref: System.unique_integer([:positive]),
-      cid: cid,
-      kind: :text,
-      body: body,
-      status: :sending
-    })
+    run(socket, %{ref: Support.new_ref(), cid: cid, kind: :text, body: body, status: :sending})
   end
 
   defp send_file(socket, cid, file, caption) do
     run(socket, %{
-      ref: System.unique_integer([:positive]),
+      ref: Support.new_ref(),
       cid: cid,
       kind: :file,
       body: caption,
@@ -1179,6 +1218,7 @@ defmodule SauronReporter.Support.Live do
       size: file.size,
       path: file.path,
       type: file.type,
+      file_id: nil,
       status: :sending
     })
   end
@@ -1189,16 +1229,32 @@ defmodule SauronReporter.Support.Live do
         do: Enum.map(socket.assigns.pending, &if(&1.ref == item.ref, do: item, else: &1)),
         else: socket.assigns.pending ++ [item]
 
-    work =
-      case item do
-        %{kind: :text, cid: cid, body: body} ->
-          fn -> Support.send_message(cid, body) end
+    socket |> assign(:pending, pending) |> start_async({:send, item.ref}, work(item))
+  end
 
-        %{kind: :file, cid: cid, path: path, name: name, type: type, body: caption} ->
-          fn -> Support.attach(cid, path, name, type, caption) end
+  defp work(%{kind: :text, cid: cid, body: body, ref: ref}),
+    do: fn -> Support.send_message(cid, body, ref: ref) end
+
+  # Uploaded once: a retry gives Sauron the same file again.
+  defp work(%{kind: :file, cid: cid, ref: ref, body: caption} = item) do
+    fn ->
+      uploaded =
+        case item.file_id do
+          nil ->
+            with {:ok, %{"id" => id}} <- Support.upload(cid, item.path, item.name, item.type),
+                 do: {:ok, id}
+
+          id ->
+            {:ok, id}
+        end
+
+      with {:ok, file_id} <- uploaded do
+        case Support.upload_done(cid, file_id, caption, ref: ref) do
+          {:error, reason} -> {:error, reason, file_id}
+          result -> result
+        end
       end
-
-    socket |> assign(:pending, pending) |> start_async({:send, item.ref}, work)
+    end
   end
 
   defp sent(socket, ref, result) do
@@ -1216,15 +1272,23 @@ defmodule SauronReporter.Support.Live do
             |> update_thread(item.cid, &merge_messages(&1, [message]))
 
           other ->
-            reason = failure(other)
+            {reason, file_id} =
+              case other do
+                {:ok, {:error, reason, file_id}} -> {reason, file_id}
+                other -> {failure(other), nil}
+              end
 
             socket
             |> assign(
               :pending,
-              Enum.map(
-                socket.assigns.pending,
-                &if(&1.ref == ref, do: %{&1 | status: :failed}, else: &1)
-              )
+              Enum.map(socket.assigns.pending, fn
+                %{ref: ^ref} = item ->
+                  %{item | status: :failed}
+                  |> then(&if(file_id, do: %{&1 | file_id: file_id}, else: &1))
+
+                item ->
+                  item
+              end)
             )
             |> assign(
               :notice,
@@ -1308,7 +1372,7 @@ defmodule SauronReporter.Support.Live do
           |> merge_messages(thread["messages"] || [])
         end)
 
-      assign(socket, :threads, threads)
+      socket |> assign(:threads, threads) |> settle()
     else
       # Never a conversation of another user's.
       socket
@@ -1327,15 +1391,16 @@ defmodule SauronReporter.Support.Live do
   defp update_thread(socket, id, fun) do
     case socket.assigns.threads do
       %{^id => thread} ->
-        assign(socket, :threads, Map.put(socket.assigns.threads, id, fun.(thread)))
+        socket |> assign(:threads, Map.put(socket.assigns.threads, id, fun.(thread))) |> settle()
 
       _ ->
         socket
     end
   end
 
-  # Messages by id — one may come both in a reply and an event — in
-  # their order.
+  # Messages by id — one may come both in a reply and an event — and by
+  # ref, the user's key for one: the first posted is the one. In their
+  # order.
   defp merge_messages(thread, messages) do
     known = Map.new(thread["messages"] || [], &{&1["id"], &1})
 
@@ -1345,8 +1410,30 @@ defmodule SauronReporter.Support.Live do
       |> Enum.reduce(known, &Map.put(&2, &1["id"], &1))
       |> Map.values()
       |> Enum.sort_by(&{sort_time(&1["inserted_at"]), &1["id"]})
+      |> Enum.uniq_by(&if is_binary(&1["ref"]), do: {:ref, &1["ref"]}, else: {:id, &1["id"]})
 
     Map.put(thread, "messages", merged)
+  end
+
+  # A message waiting on screen that Sauron already shows — come back
+  # with a resume or a history before its own reply — waits no more.
+  defp settle(socket) do
+    {done, pending} =
+      Enum.split_with(socket.assigns.pending, fn item ->
+        Enum.any?(
+          get_in(socket.assigns.threads, [item.cid, "messages"]) || [],
+          &(&1["ref"] == item.ref)
+        )
+      end)
+
+    case done do
+      [] ->
+        socket
+
+      done ->
+        Enum.each(done, &forget_file/1)
+        assign(socket, :pending, pending)
+    end
   end
 
   defp sort_time(at) do

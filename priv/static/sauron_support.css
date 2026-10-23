@@ -276,6 +276,29 @@
   flex: none;
 }
 
+/* an image of the conversation (0.8.1), fetched by the app's server */
+.aide-shot-wrap {
+  margin-top: 7px;
+}
+
+.aide-shot-wrap:first-child {
+  margin-top: 0;
+}
+
+.aide-shot {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  height: auto;
+  border: 1px solid var(--aide-line, #CED1D4);
+  border-radius: var(--aide-radius, 6px);
+  background: var(--aide-surface, #F3F6F9);
+}
+
+.aide-shot-wrap .aide-file {
+  margin-top: 0;
+}
+
 .aide-file small {
   color: var(--aide-muted, #4E5052);
 }
