@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.8.0 — 2026-10-23
+
+The support chat (Sauron plan 29, step 2): an app's signed-in users ask
+for help from the app — an idea, a problem, somebody now — and Nutshell
+answers from Sauron. Needs a Sauron with plan 29's step 1 (the support
+socket and files API) and those paths open to the app's server.
+
+- `SauronReporter.Support.Client`: the app's one WebSocket to Sauron per
+  node (Slipstream, a Phoenix channel client), `x-sauron-token: <report
+  token>`, joined to `support:<app>`; reconnects and rejoins with
+  backoff; buffers the users' calls while the link is down (500 at most,
+  30 s each), pushes them in order once joined again; answers a call in
+  flight when the link drops `{:error, :disconnected}`, never twice;
+  monitors the screens that show a conversation and tells Sauron the
+  user's presence and page; relays Sauron's events to the app's PubSub
+  (`local_broadcast`) on `sauron_support:user:<id>` and
+  `sauron_support:conversation:<id>`, the link's state on
+  `sauron_support:link`. Inert until `support: [enabled: true, pubsub:
+  MyApp.PubSub]` with the reporter's url, token and app.
+- `SauronReporter.Support`: the calls (`open/4`, `send_message/2`,
+  `upload/4`, `upload_done/3`, `attach/5`, `typing/2`, `read/1`,
+  `present/2`, `absent/1`, `submit/1`, `close/1`, `callback/2`,
+  `resume/1`, `history/2`), `{:ok, …} | {:error, reason}`, never raising.
+- `SauronReporter.Support.panel/1`: the launcher and the side panel, a
+  sticky nested LiveView (`SauronReporter.Support.Live`) — the guided
+  start, a problem or an idea with attachments and « Terminé », a live
+  chat searching then answered (typing shown), nobody in 5 minutes then
+  a callback, a screenshot asked, a request closed. Title and team
+  named by the app; French copy; the system's lines in the app's voice.
+  `launcher={false}` and `open_panel/2` / `toggle_panel/2` for the app's
+  own menu button.
+- `SauronReporter.Support.Hook` (`on_mount`): `@sauron_support_unread`
+  for that button, and the page followed across live navigation.
+- Uploads through the panel's `allow_upload` (10 MB; PNG, JPEG, GIF,
+  WebP, PDF; five at a time), forwarded by the app's server to Sauron's
+  `POST /support/files` with the token, then `upload_done`.
+- `priv/static/sauron_support.css`: every colour, face and radius from
+  `--aide-font`, `--aide-bg`, `--aide-surface`, `--aide-ink`,
+  `--aide-muted`, `--aide-line`, `--aide-field`, `--aide-accent`,
+  `--aide-accent-ink`, `--aide-mark`, `--aide-ok`, `--aide-radius`,
+  `--aide-button-radius`, `--aide-top`, each with a default;
+  `SauronReporter.Support.styles/1` inlines it.
+- `priv/static/sauron_support.js`: the `SauronSupport` hook — paste an
+  image, capture the screen (`getDisplayMedia`), Enter to send. The
+  panel works without it.
+- Dependencies: `slipstream ~> 1.2` (with `mint_web_socket`); `bandit`
+  for the tests only.
+
 ## 0.7.0 — 2026-10-22
 
 People and robots (Sauron plan 32): a page served is a request, a page

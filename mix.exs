@@ -4,13 +4,13 @@ defmodule SauronReporter.MixProject do
   def project do
     [
       app: :sauron_reporter,
-      version: "0.7.0",
+      version: "0.8.0",
       elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description:
-        "Sends an app's ErrorTracker occurrences and analytics events to Sauron, the Nutshell fleet's error manager.",
+        "Sends an app's ErrorTracker occurrences and analytics events to Sauron, the Nutshell fleet's error manager, and links its users to Sauron's support chat.",
       source_url: "https://github.com/nutshell-lab/sauron_reporter"
     ]
   end
@@ -36,7 +36,12 @@ defmodule SauronReporter.MixProject do
       {:phoenix_live_view, "~> 1.0"},
       # LiveViewTest's HTML parser, for the hook's tests.
       {:lazy_html, ">= 0.1.0", only: :test},
-      {:telemetry, "~> 1.0"}
+      {:telemetry, "~> 1.0"},
+      # Support (0.8.0): the app's one WebSocket to Sauron, a Phoenix
+      # channel client (Mint.WebSocket underneath).
+      {:slipstream, "~> 1.2"},
+      # A real Phoenix endpoint plays Sauron's support socket in the tests.
+      {:bandit, "~> 1.5", only: :test}
     ]
   end
 end

@@ -2,7 +2,7 @@
 
 Sends an Elixir app's errors — and, opt-in, its visits (0.5.0) — to
 [Sauron](https://sauron.nutshell-lab.com), the Nutshell fleet's error
-manager: every occurrence
+manager, and links its users to Sauron's support chat (0.8.0): every occurrence
 [ErrorTracker](https://hex.pm/packages/error_tracker) captures becomes a
 small JSON summary posted to Sauron's `POST /report/errors`, where it is
 grouped, alerted once per new error and classified.
@@ -17,7 +17,7 @@ IPs, headers or job arguments.
 
 ```elixir
 # mix.exs
-{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.7.0"}
+{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.8.0"}
 ```
 
 ErrorTracker is configured by the app (its repo is the local buffer):
@@ -110,6 +110,175 @@ SauronReporter.Analytics.track(conn, "signup", %{plan: "pro"})
   :dropped | :failed]` count it all.
 
 Every option is in `SauronReporter.Analytics`'s moduledoc.
+
+## Support chat (0.8.0)
+
+Sauron's plan 29: a signed-in user reports a problem, proposes an idea
+or speaks to somebody now — « J'ai une idée », « J'ai un problème »,
+« Parler à quelqu'un » — without leaving the app, and Nutshell answers
+from Sauron. The library gives the app the launcher and the side panel
+(boards 75–76 of the mockups), styled by the app's CSS variables, and
+the app's **one link** to Sauron: a WebSocket per app node, the report
+token in a header. **The browser never talks to Sauron**: the panel is
+a LiveView on the app's server, which vouches for its user.
+
+```elixir
+# config/runtime.exs, beside the reporter's url/token/app
+config :sauron_reporter,
+  support: [
+    enabled: System.get_env("SAURON_SUPPORT") in ~w(1 true),
+    pubsub: MyApp.PubSub          # Sauron's events are relayed on it
+  ]
+```
+
+Nothing to add to the supervision tree: the library's application runs
+the client, inert until support is enabled (read at boot). It connects
+to `wss://<SAURON_URL>/support/socket/websocket` and posts files to
+`/support/files`; on Sauron's side those paths must be open to the
+app's server (infra: the sauron release's `private_paths`, plan 31).
+Options (`socket_url`, `call_timeout`, `buffer_ttl`, `max_buffer`,
+backoffs, `req_options`) are in `SauronReporter.Support`'s moduledoc.
+
+### Mounting it
+
+In the layout of the `live_session`(s) where users are signed in — once,
+it is a sticky LiveView that survives live navigation:
+
+```heex
+<SauronReporter.Support.panel
+  :if={@current_user}
+  socket={@socket}
+  user={%{id: @current_user.id, name: @current_user.name, email: @current_user.email}}
+  org={%{id: @current_org.id, name: @current_org.name}}
+  title="Assistance"
+  team="l'équipe m2"
+  page={@current_path}
+/>
+```
+
+| attr | default | |
+|---|---|---|
+| `socket` | — | the LiveView's socket (a dead page's conn works too) |
+| `user` | — | `id`, `name` (or `first_name`/`last_name`), `email` — what Sauron shows and answers by email |
+| `org` | `nil` | the user's organisation in the app: `id`, `name` |
+| `title` | `"Aide"` | the panel's title and the launcher's word: « Assistance », « Aide » |
+| `team` | `"l'équipe"` | who answers, as the copy says it: « l'équipe m2 », « l'équipe Nutshell » |
+| `launcher` | `true` | the bottom-right launcher; `false` when the app opens the panel from its own menu |
+| `page` | `nil` | where the user is (a path; no query, secrets masked as analytics does) |
+| `note`, `idea_hint` | | the start's footnote and the line under « J'ai une idée » |
+| `time_zone` | `"Europe/Paris"` | the times shown (Paris is known without a tz database) |
+| `hook` | `true` | the `SauronSupport` JS hook is registered |
+| `id`, `sticky` | `"sauron-support"`, `true` | |
+
+```elixir
+# router.ex — the page's LiveView and the panel talk: unread count, page
+live_session :app, on_mount: [MyAppWeb.UserAuth, SauronReporter.Support.Hook] do
+```
+
+The socket needs no `connect_info` of its own: the user comes from the
+layout, signed into the nested LiveView's session by the endpoint; the
+page's LiveView and the panel find each other by the socket's transport.
+
+**The app's own menu button** (m2-app's lifebuoy, `launcher={false}`),
+without a script of the app's:
+
+```heex
+<button type="button" aria-label="Assistance" phx-click={SauronReporter.Support.open_panel()}>
+  <.icon name="lifebuoy" />
+  <span :if={@sauron_support_unread > 0} class="dot" aria-hidden="true"></span>
+</button>
+```
+
+`open_panel/2` (or `toggle_panel/2`) pushes `"sauron_support:open"`
+(`"sauron_support:toggle"`) to the panel's LiveView, found by its id,
+and remembers the focus that closing gives back. `@sauron_support_unread`
+is assigned by `SauronReporter.Support.Hook`: the answers that arrived
+while the panel was closed (an operator's message, nobody available, a
+screenshot asked, rejected, resolved, called).
+
+**The stylesheet and the hook.** The CSS ships in
+`priv/static/sauron_support.css` — every colour, face and radius from a
+variable with a default — and the hook (paste an image, « Capturer cet
+écran », Enter to send; the panel works without it) in
+`priv/static/sauron_support.js`:
+
+```css
+/* assets/css/app.css */
+@import "../../deps/sauron_reporter/priv/static/sauron_support.css";
+:root {
+  --aide-font: "Source Sans 3", system-ui, sans-serif;
+  --aide-bg: #FFFFFF;  --aide-surface: #F3F6F9;  --aide-ink: #1E1F21;
+  --aide-muted: #4E5052;  --aide-line: #CED1D4;  --aide-field: #848689;
+  --aide-accent: #00516C;  --aide-accent-ink: #FFFFFF;
+  --aide-mark: #900F21;  --aide-ok: #095717;
+  --aide-radius: 6px;  --aide-button-radius: 6px;
+  --aide-top: 0px;     /* where the panel starts: under a sticky header (edp-neo: 69px) */
+}
+```
+
+```js
+// assets/js/app.js
+import {SauronSupport} from "../../deps/sauron_reporter/priv/static/sauron_support.js"
+let liveSocket = new LiveSocket("/live", Socket, {hooks: {SauronSupport, ...hooks}, ...})
+```
+
+An app without a CSS build puts `<SauronReporter.Support.styles />` in
+its root layout instead; one that cannot register the hook passes
+`hook={false}` (no paste, no capture button: « Choisir une image »
+stays).
+
+### What it does
+
+- **The start**: the three choices; the user's requests not over yet to
+  resume. A live chat not over, or a request not sent yet, opens again
+  by itself.
+- **A problem or an idea**: described in messages, files attached
+  (paperclip, paste, capture; 10 MB, PNG/JPEG/GIF/WebP/PDF, five at a
+  time — a text sent with files is the first file's caption), then
+  « Terminé »: sent, it waits for an operator.
+- **A live chat**: « Nous cherchons quelqu'un » with the time waited;
+  an operator joins and answers live, their typing shown; nobody in 5
+  minutes: an email answer, and « Rappelez-moi » with a phone number.
+- **A screenshot asked**: a banner — « Capturer cet écran » where the
+  browser can, « Choisir une image », « Plus tard ».
+- **The system's lines** speak in the app's voice: the team the app
+  names, the user's email, the operator's first name — not Sauron's
+  « l'équipe Nutshell ».
+- **Accessible**: real buttons, labels and inputs; the panel is a
+  dialog, focused on opening (the first choice, or the message field),
+  Escape and « Réduire » close it and give the focus back; new messages
+  in an `aria-live` log.
+- **Only the user's**: the panel subscribes to its user's topic, drops
+  any event naming someone else, and keeps no thread Sauron says is
+  another user's.
+
+### The link
+
+- **Calls** (`SauronReporter.Support.open/4`, `send_message/2`,
+  `upload_done/3`, `attach/5`, `submit/1`, `close/1`, `callback/2`,
+  `resume/1`, `history/2`) answer `{:ok, map} | {:error, reason}`;
+  `typing/2`, `read/1`, `present/2`, `absent/1` are fire-and-forget.
+- **While the link is down** a call waits in a buffer (500 at most,
+  each 30 s at most) and is pushed in order once the channel is joined
+  again; past its time it answers `{:error, :disconnected}`, beyond the
+  bound `{:error, :buffer_full}`. A call in flight when the link drops
+  answers `{:error, :disconnected}` and is never pushed twice; the panel
+  shows it « Non envoyé » with « Réessayer ». Typing and reads are
+  dropped. Presence is said again after each reconnection, and the
+  panel catches up with what happened meanwhile (`resume`).
+- **Reconnects** with backoff, 100 ms up to 30 s.
+- **Events** go on the app's PubSub, on this node only
+  (`local_broadcast`: every node's client hears every event):
+  `{SauronReporter.Support, %SauronReporter.Support.Event{}}` on
+  `"sauron_support:user:<user_id>"` and
+  `"sauron_support:conversation:<id>"`; `{SauronReporter.Support, :link,
+  :up | :down}` on `"sauron_support:link"`.
+- Telemetry: `[:sauron_reporter, :support, :connected | :disconnected
+  | :dropped]`.
+
+Not in 0.8.0: images are shown as file chips, not previews (the browser
+never fetches Sauron's files); whether an operator is online is not
+known, so the header shows who joined, not « en ligne ».
 
 ## Our own people are not counted (0.6.0)
 
