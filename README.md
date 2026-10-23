@@ -17,7 +17,7 @@ IPs, headers or job arguments.
 
 ```elixir
 # mix.exs
-{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.8.0"}
+{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.9.0"}
 ```
 
 ErrorTracker is configured by the app (its repo is the local buffer):
@@ -111,13 +111,15 @@ SauronReporter.Analytics.track(conn, "signup", %{plan: "pro"})
 
 Every option is in `SauronReporter.Analytics`'s moduledoc.
 
-## Support chat (0.8.0, 0.8.1)
+## Support chat (0.8.0, 0.8.1, 0.9.0)
 
 Sauron's plan 29: a signed-in user reports a problem, proposes an idea
 or speaks to somebody now — « J'ai une idée », « J'ai un problème »,
 « Parler à quelqu'un » — without leaving the app, and Nutshell answers
-from Sauron. The library gives the app the launcher and the side panel
-(boards 75–76 of the mockups), styled by the app's CSS variables, and
+from Sauron. The library gives the app the support card — since 0.9.0
+a card of bounded height opened under the app's own header button,
+the thread read as correspondence (boards 78–79 of the mockups) —,
+styled by the app's CSS variables, and
 the app's **one link** to Sauron: a WebSocket per app node, the report
 token in a header. **The browser never talks to Sauron**: the panel is
 a LiveView on the app's server, which vouches for its user.
@@ -144,7 +146,8 @@ Options (`socket_url`, `call_timeout`, `buffer_ttl`, `max_buffer`,
 ### Mounting it
 
 In the layout of the `live_session`(s) where users are signed in — once,
-it is a sticky LiveView that survives live navigation:
+it is a sticky LiveView that survives live navigation — and the button
+of the app's header that opens it:
 
 ```heex
 <SauronReporter.Support.panel
@@ -152,10 +155,23 @@ it is a sticky LiveView that survives live navigation:
   socket={@socket}
   user={%{id: @current_user.id, name: @current_user.name, email: @current_user.email}}
   org={%{id: @current_org.id, name: @current_org.name}}
-  title="Assistance"
+  title="Aide"
   team="l'équipe m2"
+  anchor="#support-button"
   page={@current_path}
 />
+
+<%!-- in the header's actions --%>
+<button
+  id="support-button"
+  type="button"
+  aria-controls="sauron-support-panel"
+  aria-expanded={to_string(@sauron_support_open)}
+  phx-click={SauronReporter.Support.toggle_panel()}
+>
+  Aide
+  <span :if={@sauron_support_unread > 0} class="dot" aria-hidden="true">{@sauron_support_unread}</span>
+</button>
 ```
 
 | attr | default | |
@@ -163,9 +179,10 @@ it is a sticky LiveView that survives live navigation:
 | `socket` | — | the LiveView's socket (a dead page's conn works too) |
 | `user` | — | `id`, `name` (or `first_name`/`last_name`), `email` — what Sauron shows and answers by email |
 | `org` | `nil` | the user's organisation in the app: `id`, `name` |
-| `title` | `"Aide"` | the panel's title and the launcher's word: « Assistance », « Aide » |
+| `title` | `"Aide"` | the card's title and the slip's word: « Assistance », « Aide » |
 | `team` | `nil` (« l'équipe ») | who answers, as the copy says it: « l'équipe m2 », « l'équipe Nutshell »; sent to Sauron with `open` (0.8.1), whose own lines — emails, the operators' pages — then say it too |
-| `launcher` | `true` | the bottom-right launcher; `false` when the app opens the panel from its own menu |
+| `anchor` | `nil` | (0.9.0) a CSS selector of the app's own button the card opens under, `"#support-button"`; needs the hook |
+| `launcher` | `nil`: `true` without an `anchor`, `false` with one | (0.9.0) the discreet slip at the bottom right, for an app without a header button |
 | `page` | `nil` | where the user is (a path; no query, secrets masked as analytics does) |
 | `note`, `idea_hint` | | the start's footnote and the line under « J'ai une idée » |
 | `time_zone` | `"Europe/Paris"` | the times shown (Paris is known without a tz database) |
@@ -173,35 +190,87 @@ it is a sticky LiveView that survives live navigation:
 | `id`, `sticky` | `"sauron-support"`, `true` | |
 
 ```elixir
-# router.ex — the page's LiveView and the panel talk: unread count, page
+# router.ex — the page's LiveView and the card talk: unread count, open, page
 live_session :app, on_mount: [MyAppWeb.UserAuth, SauronReporter.Support.Hook] do
 ```
 
 The socket needs no `connect_info` of its own: the user comes from the
 layout, signed into the nested LiveView's session by the endpoint; the
-page's LiveView and the panel find each other by the socket's transport.
+page's LiveView and the card find each other by the socket's transport.
 
-**The app's own menu button** (m2-app's lifebuoy, `launcher={false}`),
-without a script of the app's:
+**Where the card opens** (0.9.0). A card of bounded height —
+`--aide-width` wide (400px), `--aide-max-h` high at most (600px), never
+past the window — where only the thread scrolls: the header (the
+title, the request's state) and the composer stay put.
+
+- **Under the app's button**: the hook places it under the `anchor`,
+  aligned to the button's right edge, a small pointer towards it, and
+  follows the button on resize and scroll. Without an `anchor`, under
+  the button that ran `toggle_panel/2` or `open_panel/2` — they
+  dispatch `sauron-support:trigger` from it, so an app that passes
+  neither still gets the card under its button. Échap and the button
+  (`toggle_panel/2`) close it; the focus goes back to the button.
+- **On a phone** (640px wide or less): a bottom sheet, the screen's
+  width less 16px each side, 70% of its height at most, the app's
+  header in sight.
+- **The slip** (`launcher`, the default without an `anchor`): for an
+  app without a header button, a discreet slip at the bottom right —
+  the title, and the last answer waiting (« Thomas vous a répondu ·
+  09:32 », with the count) or « Écrire à l'équipe m2 » — and the card
+  opens above it.
+- With neither (or without the hook), the card opens at the top right,
+  under `--aide-top`.
+
+`toggle_panel/2` (`open_panel/2`) pushes `"sauron_support:toggle"`
+(`"sauron_support:open"`) to the card's LiveView, found by its id, and
+remembers the focus that closing gives back; no script of the app's.
+The on_mount hook assigns `@sauron_support_unread` — the answers that
+arrived while the card was closed (an operator's message, nobody
+available, a screenshot asked, rejected, resolved, called) — and
+`@sauron_support_open` (0.9.0), for the button's `aria-expanded` and its
+pressed look.
+
+### One drawer at a time (0.9.0)
+
+An app with drawers of its own — m2-app's assistant, Arpent — keeps the
+card and them from being open together. The hook dispatches on
+`window`:
+
+| event | when | `detail` |
+|---|---|---|
+| `sauron-support:open` | the card opened, whatever opened it | `{id: "sauron-support", trigger: element \| null}` |
+| `sauron-support:close` | the card closed, whatever closed it | the same |
+
+and closes the card when it hears, on `window`:
+
+| event | from |
+|---|---|
+| `sauron-support:close-request` | the app's script: `window.dispatchEvent(new CustomEvent("sauron-support:close-request"))` |
+| `phx:sauron-support:close-request` | the app's server: `push_event(socket, "sauron-support:close-request", %{})` |
+
+Without a script, `SauronReporter.Support.close_panel/2` closes it from
+a button:
 
 ```heex
-<button type="button" aria-label="Assistance" phx-click={SauronReporter.Support.open_panel()}>
-  <.icon name="lifebuoy" />
-  <span :if={@sauron_support_unread > 0} class="dot" aria-hidden="true"></span>
-</button>
+<button phx-click={JS.push("open_assistant") |> SauronReporter.Support.close_panel()}>Arpent</button>
 ```
 
-`open_panel/2` (or `toggle_panel/2`) pushes `"sauron_support:open"`
-(`"sauron_support:toggle"`) to the panel's LiveView, found by its id,
-and remembers the focus that closing gives back. `@sauron_support_unread`
-is assigned by `SauronReporter.Support.Hook`: the answers that arrived
-while the panel was closed (an operator's message, nobody available, a
-screenshot asked, rejected, resolved, called).
+and the other way round, the drawer closes when the card opens — in the
+app's own hook on the drawer:
+
+```js
+mounted() {
+  this.onSupport = () => this.pushEvent("close_assistant", {})
+  window.addEventListener("sauron-support:open", this.onSupport)
+},
+destroyed() { window.removeEventListener("sauron-support:open", this.onSupport) }
+```
 
 **The stylesheet and the hook.** The CSS ships in
-`priv/static/sauron_support.css` — every colour, face and radius from a
-variable with a default — and the hook (paste an image, « Capturer cet
-écran », Enter to send; the panel works without it) in
+`priv/static/sauron_support.css` — every colour, face, radius and size
+from a variable with a default — and the hook (placing the card, the
+events above, paste an image, « Capturer cet écran », Enter to send;
+the card works without it, unanchored) in
 `priv/static/sauron_support.js`:
 
 ```css
@@ -214,9 +283,20 @@ variable with a default — and the hook (paste an image, « Capturer cet
   --aide-accent: #00516C;  --aide-accent-ink: #FFFFFF;
   --aide-mark: #900F21;  --aide-ok: #095717;
   --aide-radius: 6px;  --aide-button-radius: 6px;
-  --aide-top: 0px;     /* where the panel starts: under a sticky header (edp-neo: 69px) */
+  --aide-top: 0px;        /* the app's sticky header: the card and the sheet stay below it */
+  /* 0.9.0 */
+  --aide-width: 400px;    /* the card's width */
+  --aide-max-h: 600px;    /* its height at most: min(--aide-max-h, 100vh - --aide-top - 32px) */
+  --aide-card-radius: 8px;
+  --aide-shadow: 0 12px 28px rgba(0, 0, 0, 0.14);
+  --aide-z: 1000;         /* the card's and the slip's z-index */
+  --aide-note-size: 15px; /* the text of the notes and the composer */
 }
 ```
+
+The hook sets `--aide-at-top`, `--aide-at-right`, `--aide-at-pointer`
+and `--aide-at-pointer-shown` on `<html>` (the LiveView never patches
+it): where the button is. They are not the app's to set.
 
 ```js
 // assets/js/app.js
@@ -226,14 +306,31 @@ let liveSocket = new LiveSocket("/live", Socket, {hooks: {SauronSupport, ...hook
 
 An app without a CSS build puts `<SauronReporter.Support.styles />` in
 its root layout instead; one that cannot register the hook passes
-`hook={false}` (no paste, no capture button: « Choisir une image »
-stays).
+`hook={false}` (no anchoring, no events, no paste, no capture button:
+« Choisir une image » stays).
+
+**Moving to 0.9.0.** The full-height side panel is gone (`.aide-panel`,
+`.aide-launch`, the bubbles `.aide-b`): an app that styled them drops
+those rules. An app with a header button gives it an id and passes it
+as `anchor` (and swaps `open_panel/2` for `toggle_panel/2` so the button
+closes the card too); `launcher={false}` can go. An app that relied on
+the default launcher and has no header button keeps it, now the slip.
+`--aide-top` now only keeps the card and the sheet below a sticky
+header.
 
 ### What it does
 
-- **The start**: the three choices; the user's requests not over yet to
-  resume. A live chat not over, or a request not sent yet, opens again
-  by itself.
+- **The start**: says plainly that a person answers (« Une personne de
+  l'équipe m2 vous répond — ce n'est pas un assistant automatique. »),
+  then the three choices as a plain list, one line each; the user's
+  requests not over yet to resume. A live chat not over, or a request
+  not sent yet, opens again by itself.
+- **The thread as correspondence** (0.9.0): no bubbles — each message a
+  short dated note under its sender's line (« Thomas, de l'équipe m2 ·
+  09:32 », « Vous · 09:30 »; the same sender's next message within five
+  minutes joins the note), the text at reading size, attachments as
+  named lines, the system's events quiet centred lines, a heading for
+  each day; the composer a three-line field.
 - **A problem or an idea**: described in messages, files attached
   (paperclip, paste, capture; 10 MB, PNG/JPEG/GIF/WebP/PDF, five at a
   time — a text sent with files is the first file's caption), then
@@ -241,8 +338,9 @@ stays).
 - **A live chat**: « Nous cherchons quelqu'un » with the time waited;
   an operator joins and answers live, their typing shown; nobody in 5
   minutes: an email answer, and « Rappelez-moi » with a phone number.
-- **A screenshot asked**: a banner — « Capturer cet écran » where the
-  browser can, « Choisir une image », « Plus tard ».
+- **A screenshot asked**: a box, bordered all round, above the composer
+  — « Capturer cet écran » where the browser can, « Choisir une image »,
+  « Plus tard ».
 - **Images shown** (0.8.1): the panel's server fetches each image of
   the conversation from Sauron for its user (`GET
   /support/files/:id?user_id=…`, which Sauron answers only when the
@@ -250,18 +348,19 @@ stays).
   in a LiveComponent (`SauronReporter.Support.Preview`), so it crosses
   the socket once. No route to mount; the browser never sees Sauron's
   URL or token. Up to `preview_max_size` (3 MB; `0` turns previews
-  off), else — and for PDFs — a chip. An app with a
+  off), shown inside the note with its name under it; else — and for
+  PDFs — a named line. An app with a
   Content-Security-Policy allows `img-src data:`.
 - **The system's lines** speak in the app's voice, every one of them
   (0.8.1): worded by the panel from the facts Sauron sends with each
   line — the operator's first name, the phone, the user's email, a
   rejection's reason — and the team the app names. Sauron's French is
   shown only for a code the panel does not know.
-- **Accessible**: real buttons, labels and inputs; the panel is a
+- **Accessible**: real buttons, labels and inputs; the card is a
   dialog, focused on opening (the first choice, or the message field),
-  Escape and « Réduire » close it and give the focus back; new messages
-  in an `aria-live` log.
-- **Only the user's**: the panel subscribes to its user's topic, drops
+  Échap and « Réduire » close it and give the focus back to the button;
+  new messages in an `aria-live` log; the thread scrolls by keyboard.
+- **Only the user's**: the card subscribes to its user's topic, drops
   any event naming someone else, and keeps no thread Sauron says is
   another user's.
 

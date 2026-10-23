@@ -11,9 +11,10 @@ defmodule SauronReporter.Support do
       token; it reconnects, buffers the users' calls while the link is
       down, and relays Sauron's events to the app's own PubSub. **The
       browser never talks to Sauron**: the app vouches for its user.
-    * `panel/1` — the component the app puts in its layout: the launcher
-      at the bottom right (or the app's own menu button, `open_panel/1`)
-      and the side panel, a nested LiveView (`SauronReporter.Support.Live`).
+    * `panel/1` — the component the app puts in its layout: a card of
+      bounded height opened under the app's own header button (the
+      `anchor`, `toggle_panel/2`), or from a discreet slip at the bottom
+      right (`launcher`), a nested LiveView (`SauronReporter.Support.Live`).
     * the calls below — what the panel uses, open to an app that wants
       its own screens.
 
@@ -324,26 +325,76 @@ defmodule SauronReporter.Support do
   defp put_present(map, _key, ""), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)
 
-  # ---------- the panel ----------
+  # ---------- the card ----------
 
   @doc """
-  The support's launcher and panel, for a signed-in user: a nested
-  LiveView (`SauronReporter.Support.Live`), sticky by default so a
-  conversation survives live navigation. Renders nothing while support
-  is not enabled or without a user id.
+  The support card, for a signed-in user: a nested LiveView
+  (`SauronReporter.Support.Live`), sticky by default so a conversation
+  survives live navigation. Renders nothing while support is not
+  enabled or without a user id.
 
       <SauronReporter.Support.panel
         socket={@socket}
         user={%{id: @current_user.id, name: @current_user.name, email: @current_user.email}}
         org={%{id: @org.id, name: @org.name}}
-        title="Assistance"
+        title="Aide"
         team="l'équipe m2"
-        launcher={false}
+        anchor="#support-button"
         page={@current_path}
       />
 
+      <%!-- in the app's header --%>
+      <button id="support-button" type="button" phx-click={SauronReporter.Support.toggle_panel()}
+              aria-controls="sauron-support-panel" aria-expanded={to_string(@sauron_support_open)}>
+        Aide
+      </button>
+
   A sticky LiveView is rendered in the layout of a `live_session`, once
   (its id names it).
+
+  ## Where the card opens (0.9.0)
+
+  A card of bounded height — `--aide-width` wide (400px),
+  `--aide-max-h` high at most (600px), never past the window — where
+  only the thread scrolls: its header (the title, the request's state)
+  and its composer stay put.
+
+    * **Under the app's button.** The `SauronSupport` hook opens the
+      card under the `anchor` (a CSS selector), aligned to its right
+      edge, a small pointer towards it; without an `anchor`, under the
+      button that ran `open_panel/2` or `toggle_panel/2` (they dispatch
+      `sauron-support:trigger` from it). It follows the button on
+      resize and scroll. Échap and the button (with `toggle_panel/2`)
+      close it, and the focus goes back to the button.
+    * **On a phone** (640px wide or less), a bottom sheet: the width of
+      the screen less 16px each side, 70% of its height at most, the
+      app's header still in sight.
+    * **The slip** (`launcher`): for an app without a header button, a
+      discreet slip at the bottom right — the title and the last answer
+      waiting (« Thomas vous a répondu · 09:32 »), else « Écrire à
+      <team> » — and the card opens above it. Shown by default only
+      when no `anchor` is given.
+    * Without an anchor, a trigger or the slip (or the hook), the card
+      opens at the top right, under `--aide-top`.
+
+  ## One drawer at a time
+
+  The hook tells the page, on `window`:
+
+    * `sauron-support:open` and `sauron-support:close` — `CustomEvent`s,
+      `detail: %{id: "sauron-support", trigger: element | null}` — when
+      the card opens and closes, whatever opened or closed it;
+
+  and listens, on `window`, to:
+
+    * `sauron-support:close-request` — from the app's own script:
+      `window.dispatchEvent(new CustomEvent("sauron-support:close-request"))`;
+    * `phx:sauron-support:close-request` — from the app's server:
+      `push_event(socket, "sauron-support:close-request", %{})`.
+
+  Without a script: `close_panel/2` closes it from a button's
+  `phx-click` (the app's other drawer's), and the page's LiveView has
+  `@sauron_support_open` (`SauronReporter.Support.Hook`).
   """
   attr(:socket, :any,
     required: true,
@@ -356,7 +407,7 @@ defmodule SauronReporter.Support do
   )
 
   attr(:org, :any, default: nil, doc: "the user's organisation in the app: `id`, `name`")
-  attr(:title, :string, default: "Aide", doc: "the panel's title, the launcher's word")
+  attr(:title, :string, default: "Aide", doc: "the card's title, the slip's word")
 
   attr(:team, :string,
     default: nil,
@@ -364,9 +415,16 @@ defmodule SauronReporter.Support do
       "who answers, as the copy says it: « l'équipe m2 » (default « l'équipe »); sent to Sauron, whose own lines then say it"
   )
 
+  attr(:anchor, :string,
+    default: nil,
+    doc:
+      "a CSS selector of the app's own button the card opens under (`\"#support-button\"`); needs the hook"
+  )
+
   attr(:launcher, :boolean,
-    default: true,
-    doc: "the bottom-right launcher; false when the app opens the panel from its own menu"
+    default: nil,
+    doc:
+      "the discreet slip at the bottom right, for an app without a header button; default: only when no `anchor` is given"
   )
 
   attr(:page, :string,
@@ -411,7 +469,9 @@ defmodule SauronReporter.Support do
       "org" => org_params(assigns.org),
       "title" => assigns.title,
       "team" => assigns.team,
-      "launcher" => assigns.launcher,
+      "anchor" => anchor(assigns.anchor),
+      "launcher" =>
+        if(is_nil(assigns.launcher), do: is_nil(anchor(assigns.anchor)), else: assigns.launcher),
       "page" => page(assigns.page),
       "note" => assigns.note,
       "idea_hint" => assigns.idea_hint,
@@ -420,32 +480,60 @@ defmodule SauronReporter.Support do
     }
   end
 
+  defp anchor(anchor) when is_binary(anchor) do
+    case String.trim(anchor) do
+      "" -> nil
+      anchor -> anchor
+    end
+  end
+
+  defp anchor(_), do: nil
+
   @doc """
-  The JS command an app's own button runs to open the panel — the menu
-  variant (`launcher={false}`):
+  The JS command an app's own button runs to open the card:
 
-      <button type="button" phx-click={SauronReporter.Support.open_panel()}
-              aria-label="Assistance">…</button>
+      <button id="support-button" type="button" phx-click={SauronReporter.Support.toggle_panel()}
+              aria-label="Aide">…</button>
 
-  It pushes `"sauron_support:open"` to the panel's LiveView (found by
-  its id, `"sauron-support"` unless the panel was given another) and
-  remembers the focus, which closing the panel gives back. No script of
+  It dispatches `sauron-support:trigger` from the button — the hook
+  opens the card under it when the component names no `anchor` —,
+  pushes `"sauron_support:open"` to the card's LiveView (found by its
+  id, `"sauron-support"` unless the component was given another) and
+  remembers the focus, which closing the card gives back. No script of
   the app's own.
   """
   def open_panel(js \\ %JS{}, id \\ "sauron-support") do
-    js |> JS.push_focus() |> JS.push("sauron_support:open", target: "##{id}")
+    js
+    |> JS.push_focus()
+    |> JS.dispatch("sauron-support:trigger", detail: %{id: id})
+    |> JS.push("sauron_support:open", target: "##{id}")
   end
 
-  @doc "As `open_panel/2`, but closes the panel when it is open."
+  @doc "As `open_panel/2`, but closes the card when it is open: the header button's command."
   def toggle_panel(js \\ %JS{}, id \\ "sauron-support") do
-    js |> JS.push_focus() |> JS.push("sauron_support:toggle", target: "##{id}")
+    js
+    |> JS.push_focus()
+    |> JS.dispatch("sauron-support:trigger", detail: %{id: id})
+    |> JS.push("sauron_support:toggle", target: "##{id}")
   end
 
-  @doc "The panel's stylesheet (`priv/static/sauron_support.css`), for an app that inlines it."
+  @doc """
+  The JS command that closes the card, for the app's other drawers —
+  only one open at a time:
+
+      <button phx-click={JS.push("open_assistant") |> SauronReporter.Support.close_panel()}>
+
+  Nothing happens when the card is closed.
+  """
+  def close_panel(js \\ %JS{}, id \\ "sauron-support") do
+    JS.push(js, "sauron_support:close", target: "##{id}")
+  end
+
+  @doc "The card's stylesheet (`priv/static/sauron_support.css`), for an app that inlines it."
   def css, do: @css
 
   @doc """
-  A `<style>` with the panel's stylesheet, for an app without a CSS
+  A `<style>` with the card's stylesheet, for an app without a CSS
   build that includes it (`@import "../../deps/sauron_reporter/priv/static/sauron_support.css";`).
   """
   attr(:nonce, :string, default: nil)

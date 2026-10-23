@@ -69,4 +69,16 @@ defmodule SauronReporter.SupportCopyTest do
 
     assert line("inconnu") == {:line, "Le texte de Sauron."}
   end
+
+  test "a person answers, in the team's name; what a file is, before its size" do
+    assert Copy.person("l'équipe m2") ==
+             "Une personne de l'équipe m2 vous répond — ce n'est pas un assistant automatique."
+
+    assert Copy.file_kind(%{"content_type" => "application/pdf"}) == "PDF, "
+    assert Copy.file_kind(%{"content_type" => "image/png"}) == "image, "
+    assert Copy.file_kind(%{"type" => "image"}) == "image, "
+    assert Copy.file_kind(%{"type" => "file", "name" => "Devis.PDF"}) == "PDF, "
+    assert Copy.file_kind(%{"type" => "file", "name" => "notes.txt"}) == ""
+    assert Copy.file_kind(nil) == ""
+  end
 end

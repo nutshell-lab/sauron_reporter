@@ -7,10 +7,21 @@ defmodule SauronReporter.SupportLiveTest.Page do
   }
 
   def mount(params, _session, socket) do
+    anchor? = params["anchor"] == "1"
+
     {:ok,
      assign(socket,
        user: Map.fetch!(@users, params["user"] || "42"),
-       launcher: params["menu"] != "1",
+       # The menu variant (`launcher={false}`, 0.8), the anchored card
+       # (0.9.0: the launcher's default), the slip asked for all the same.
+       menu: params["menu"] == "1" or anchor?,
+       anchor: if(anchor?, do: "#menu"),
+       launcher:
+         cond do
+           params["slip"] == "1" -> true
+           params["menu"] == "1" -> false
+           true -> nil
+         end,
        team: if(params["team"] == "0", do: nil, else: "l'équipe m2"),
        path: nil
      )}
@@ -23,11 +34,17 @@ defmodule SauronReporter.SupportLiveTest.Page do
     ~H"""
     <header>
       <button
-        :if={not @launcher}
+        :if={@menu}
         id="menu"
         type="button"
         aria-label="Assistance"
-        phx-click={SauronReporter.Support.open_panel()}
+        aria-controls="sauron-support-panel"
+        aria-expanded={to_string(@sauron_support_open)}
+        phx-click={
+          if @anchor,
+            do: SauronReporter.Support.toggle_panel(),
+            else: SauronReporter.Support.open_panel()
+        }
       >
         Assistance<span :if={@sauron_support_unread > 0} class="dot">{@sauron_support_unread}</span>
       </button>
@@ -39,6 +56,7 @@ defmodule SauronReporter.SupportLiveTest.Page do
       title="Assistance"
       team={@team}
       launcher={@launcher}
+      anchor={@anchor}
       page={@path}
     />
     """
@@ -75,6 +93,8 @@ end
 
 defmodule SauronReporter.SupportLiveTest do
   use SauronReporter.SupportCase, async: false
+
+  alias SauronReporter.Support.Copy
 
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
@@ -159,7 +179,15 @@ defmodule SauronReporter.SupportLiveTest do
     assert html =~ ~s(role="dialog")
     assert html =~ "Assistance"
     assert html =~ "L&#39;équipe m2"
-    assert html =~ "Bonjour Camille — comment pouvons-nous vous aider ?"
+    assert html =~ "Bonjour Camille. Que souhaitez-vous faire ?"
+
+    # A person answers, and says so.
+    assert html =~
+             "Une personne de l&#39;équipe m2 vous répond — ce n&#39;est pas un assistant automatique."
+
+    # A plain list of the three choices, one line each.
+    assert html =~ ~s(<ul class="aide-chs" id="sauron-support-choices">)
+    assert length(String.split(html, ~s(<li><button type="button" class="aide-ch"))) == 4
     assert html =~ "J&#39;ai une idée"
     assert html =~ "J&#39;ai un problème"
     assert html =~ "Parler à quelqu&#39;un"
@@ -188,14 +216,24 @@ defmodule SauronReporter.SupportLiveTest do
     assert html =~ "Thomas, de l&#39;équipe m2, a rejoint la conversation"
     assert html =~ ~s(<i class="aide-on" aria-hidden="true"></i>Thomas, de l&#39;équipe m2)
     assert html =~ "Bonjour Camille, je regarde tout de suite."
-    assert html =~ ~s(class="aide-b aide-them")
+    # Correspondence: a dated note under its sender's line, no bubble;
+    # the system's events quiet lines; a heading for the day.
+    assert html =~
+             ~s(<article class="aide-note aide-note-them"><p class="aide-from"><b>Thomas</b>, de l&#39;équipe m2 · <time>)
+
+    assert html =~ ~s(<p class="aide-evt">Thomas, de l&#39;équipe m2, a rejoint la conversation ·)
+    assert html =~ ~s(<h3 class="aide-day">)
+    refute html =~ ~s(class="aide-b )
+    assert html =~ ~s(rows="3")
     assert html =~ "Écrivez à Thomas…"
     refute html =~ "Thomas écrit…"
     assert_receive {:fake_sauron, "read", %{"conversation_id" => ^id}}
 
     html = say(panel, "Firefox, sur la fiche du gymnase.")
     assert html =~ "Firefox, sur la fiche du gymnase."
-    assert html =~ "Vous ·"
+
+    assert html =~
+             ~s(<article class="aide-note aide-note-me"><p class="aide-from"><b>Vous</b> · <time>)
 
     assert [{"message", %{"body" => "Firefox, sur la fiche du gymnase."}}] =
              for({"message", _} = call <- FakeSauron.calls(), do: call)
@@ -228,6 +266,10 @@ defmodule SauronReporter.SupportLiveTest do
     # The image itself, fetched by the panel's server for Camille.
     html = shown(panel, ~s(class="aide-shot"))
     assert html =~ ~s(alt="Image jointe : capture-bibliotheque.png")
+    # Inside the note, its name as a line under it.
+    assert html =~
+             ~r{<img class="aide-shot"[^>]*/?><p class="aide-file">.*?capture-bibliotheque.png <small>· image, }s
+
     assert html =~ ~s(src="data:image/png;base64,#{Base.encode64(@png)}")
     refute html =~ FakeSauron.url()
 
@@ -295,6 +337,8 @@ defmodule SauronReporter.SupportLiveTest do
     refute html =~ "Capturer cet écran"
 
     # The hook says the browser can capture.
+    assert html =~ ~s(<div class="aide-req" role="status">)
+
     html = render_hook(panel, "capabilities", %{"capture" => true})
     assert html =~ "Capturer cet écran"
     assert html =~ "sauron:capture"
@@ -371,7 +415,7 @@ defmodule SauronReporter.SupportLiveTest do
     assert FakeSauron.conversation(id).request["state"] == "closed"
 
     html = panel |> element("button", "Nouvelle demande") |> render_click()
-    assert html =~ "comment pouvons-nous vous aider ?"
+    assert html =~ "Que souhaitez-vous faire ?"
   end
 
   test "files chosen for one request do not ride into the next" do
@@ -431,9 +475,15 @@ defmodule SauronReporter.SupportLiveTest do
     assert html =~ "Bonjour Karim"
   end
 
-  test "the launcher counts the answers that arrive while the panel is closed" do
+  test "without an anchor, the slip: the invitation, then the last answer and the count" do
     {_view, panel} = page()
-    open(panel)
+    html = render(panel)
+    assert html =~ ~s(class="aide-slip")
+    assert html =~ "<b>Assistance</b><small>Écrire à l&#39;équipe m2</small>"
+
+    # Opened from the slip, the card stands above it, bottom right.
+    assert open(panel) =~ ~s(class="aide aide-card aide-card-low")
+    refute render(panel) =~ "aide-slip"
     choose(panel, "Parler à quelqu'un")
     id = current(panel)
     render_click(panel, "close_panel", %{})
@@ -442,6 +492,7 @@ defmodule SauronReporter.SupportLiveTest do
     html = shown(panel, "1 nouvelle réponse")
     assert html =~ ~s(aria-label="Assistance, 1 nouvelle réponse")
     assert html =~ ~s(<span class="aide-badge" aria-hidden="true">1</span>)
+    assert html =~ ~r{<small>Thomas vous a répondu · \d\d:\d\d</small>}
 
     # A screenshot asked is an answer too; the claim was not.
     FakeSauron.ask_screenshot(id)
@@ -473,6 +524,107 @@ defmodule SauronReporter.SupportLiveTest do
 
     FakeSauron.operator_says(id, "Une réponse.")
     assert eventually(fn -> render(view) =~ ~s(<span class="dot">1</span>) end)
+  end
+
+  test "anchored to the app's button: no slip by default, the card under the button, its state to the page" do
+    {view, panel} = page("/pages/1?anchor=1")
+
+    html = render(panel)
+    assert html =~ ~s(data-anchor="#menu")
+    assert html =~ ~s(data-panel="sauron-support")
+    refute html =~ "aide-slip"
+
+    # The button carries itself to the hook, and toggles the card.
+    button = view |> element("#menu") |> render()
+    assert button =~ "&quot;dispatch&quot;"
+    assert button =~ "sauron-support:trigger"
+    assert button =~ "&quot;detail&quot;:{&quot;id&quot;:&quot;sauron-support&quot;}"
+    assert button =~ "sauron_support:toggle"
+    assert button =~ ~s(aria-expanded="false")
+
+    html = render_click(panel, "sauron_support:toggle", %{})
+    assert html =~ ~s(class="aide aide-card")
+    refute html =~ "aide-card-low"
+    assert eventually(fn -> render(view) =~ ~s(aria-expanded="true") end)
+
+    render_click(panel, "sauron_support:toggle", %{})
+    refute render(panel) =~ "aide-card"
+    assert eventually(fn -> render(view) =~ ~s(aria-expanded="false") end)
+  end
+
+  test "an anchor and the slip asked for all the same: both, the card under the button" do
+    {_view, panel} = page("/pages/1?anchor=1&slip=1")
+    assert render(panel) =~ "aide-slip"
+    html = open(panel)
+    assert html =~ ~s(class="aide aide-card")
+    refute html =~ "aide-card-low"
+  end
+
+  test "one drawer at a time: the app closes the card, by a JS command or the hook's request" do
+    {_view, panel} = page("/pages/1?anchor=1")
+
+    # `close_panel/2`, from the app's other drawer's button.
+    js = SauronReporter.Support.close_panel() |> Jason.encode!()
+    assert js =~ ~s("event":"sauron_support:close")
+    assert js =~ ~s("target":"#sauron-support")
+
+    open(panel)
+    refute render_click(panel, "sauron_support:close", %{}) =~ "aide-card"
+    # Closed already: nothing happens.
+    refute render_click(panel, "sauron_support:close", %{}) =~ "aide-card"
+
+    # The hook, on `sauron-support:close-request`.
+    open(panel)
+    refute render_click(panel, "close_panel", %{}) =~ "aide-card"
+  end
+
+  test "the DOM events contract: the hook and the docs name the same events" do
+    js = File.read!(Path.join([__DIR__, "..", "priv", "static", "sauron_support.js"]))
+    {:docs_v1, _, _, _, _, _, docs} = Code.fetch_docs(SauronReporter.Support)
+
+    panel_doc =
+      Enum.find_value(docs, fn
+        {{:function, :panel, 1}, _, _, %{"en" => doc}, _} -> doc
+        _ -> nil
+      end)
+
+    for event <- ~w(sauron-support:open sauron-support:close sauron-support:close-request
+                    phx:sauron-support:close-request) do
+      assert js =~ ~s("#{event}"), "the hook does not name #{event}"
+      assert panel_doc =~ "`#{event}`", "panel/1's doc does not name #{event}"
+    end
+
+    assert js =~ ~S|window.dispatchEvent(new CustomEvent(name, {detail: {id: this.id, trigger}}))|
+    assert js =~ ~s("sauron-support:trigger")
+    assert panel_doc =~ "sauron-support:trigger"
+  end
+
+  test "a heading for each day of the correspondence" do
+    {_view, panel} = page()
+    open(panel)
+    choose(panel, "Parler à quelqu'un")
+    id = current(panel)
+    yesterday = DateTime.add(DateTime.utc_now(), -86_400)
+
+    FakeSauron.push("message", %{
+      "conversation_id" => id,
+      "user_id" => "42",
+      "message" => %{
+        "id" => Ecto.UUID.generate(),
+        "author" => %{"kind" => "operator", "name" => "Thomas Girard"},
+        "content" => %{"type" => "text", "body" => "Hier déjà."},
+        "inserted_at" => DateTime.to_iso8601(yesterday)
+      }
+    })
+
+    html = shown(panel, "Hier déjà.")
+    today = Copy.local(DateTime.utc_now(), "Europe/Paris")
+    before = Copy.day(Copy.local(yesterday, "Europe/Paris"), today)
+
+    assert [_, after_yesterday] = String.split(html, ~s(<h3 class="aide-day">#{before}</h3>))
+    assert after_yesterday =~ "Hier déjà."
+    assert after_yesterday =~ ~s(<h3 class="aide-day">#{Copy.day(today, today)}</h3>)
+    assert after_yesterday =~ "<b>Thomas</b>, de l&#39;équipe m2 ·"
   end
 
   test "the page follows live navigation" do
@@ -576,8 +728,8 @@ defmodule SauronReporter.SupportLiveTest do
     |> render_upload("grande.png")
 
     html = say(panel, "")
-    assert html =~ "devis.pdf"
-    assert html =~ "grande.png"
+    assert html =~ ~r{<p class="aide-file">.*?devis.pdf <small>· PDF, 13 o</small>}s
+    assert html =~ ~r{<p class="aide-file">.*?grande.png <small>· image, }s
     refute html =~ "aide-shot\""
     refute html =~ "data:image"
     assert FakeSauron.fetches() == []
@@ -646,7 +798,8 @@ defmodule SauronReporter.SupportLiveTest do
 
     for var <- ~w(--aide-font --aide-bg --aide-surface --aide-ink --aide-muted --aide-line
                   --aide-field --aide-accent --aide-accent-ink --aide-mark --aide-ok
-                  --aide-radius --aide-button-radius --aide-top) do
+                  --aide-radius --aide-button-radius --aide-top --aide-width --aide-max-h
+                  --aide-card-radius --aide-shadow --aide-z --aide-note-size) do
       assert css =~ "var(#{var},", "#{var} not used with a default"
     end
 
@@ -656,5 +809,42 @@ defmodule SauronReporter.SupportLiveTest do
     assert Regex.scan(~r/#[0-9A-Fa-f]{3,6}\b/, rules) == [["#FFFFFF"]]
 
     assert render_component(&Support.styles/1, %{}) =~ "--aide-accent"
+  end
+
+  test "the stylesheet: a card of bounded height, a sheet on a phone, no full-height panel" do
+    css = Regex.replace(~r{/\*.*?\*/}s, Support.css(), "")
+    rule = fn selector -> Regex.run(~r/(?:^|\n)#{Regex.escape(selector)} \{([^}]*)\}/, css) end
+
+    [_, card] = rule.(".aide-card")
+    assert card =~ "position: fixed;"
+    assert card =~ "width: var(--aide-width, 400px);"
+
+    assert card =~
+             "max-height: min(var(--aide-max-h, 600px), calc(100vh - var(--aide-at-top, calc(var(--aide-top, 0px) + 16px)) - 16px));"
+
+    refute card =~ "bottom: 0"
+
+    [_, low] = rule.(".aide-card-low")
+
+    assert low =~
+             "max-height: min(var(--aide-max-h, 600px), calc(100vh - var(--aide-top, 0px) - 32px));"
+
+    # Only the thread scrolls.
+    [_, thread] = rule.(".aide-t")
+    assert thread =~ "overflow-y: auto;"
+    assert thread =~ "min-height: 0;"
+
+    for fixed <- [".aide-h", ".aide-c", ".aide-req"],
+        do: assert(elem(List.to_tuple(rule.(fixed)), 1) =~ "flex: none;")
+
+    # The phone's sheet.
+    assert css =~
+             ~r/@media \(max-width: 640px\) \{\s+\.aide-card,\s+\.aide-card-low \{[^}]*left: 16px;[^}]*right: 16px;[^}]*max-height: min\(70vh,/
+
+    # The screenshot asked: bordered all round, never a bar on one edge.
+    [_, req] = rule.(".aide-req")
+    assert req =~ "border: 1.5px solid"
+    refute css =~ ".aide-panel"
+    refute Regex.match?(~r/border-(left|right): [3-9]px/, css)
   end
 end

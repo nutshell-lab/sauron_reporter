@@ -8,7 +8,9 @@ defmodule SauronReporter.Support.Hook do
     * **the unread count**: the hook assigns `@sauron_support_unread`
       (an integer, 0 at first) and keeps it as the panel counts the
       answers that arrive while it is closed — for the app's own menu
-      button and its dot (`launcher={false}`);
+      button and its dot;
+    * **whether the card is open** (0.9.0): `@sauron_support_open`, a
+      boolean — the header button's `aria-expanded`, its pressed look;
     * **the page**: on each live navigation the panel hears the new path
       and tells Sauron where the user is (a sticky panel outlives the
       page that rendered it, so its `page` attribute is the first page
@@ -20,7 +22,7 @@ defmodule SauronReporter.Support.Hook do
   is the one the panel was mounted on.
   """
 
-  import Phoenix.Component, only: [assign: 3]
+  import Phoenix.Component, only: [assign: 2, assign: 3]
   import Phoenix.LiveView, only: [attach_hook: 4, connected?: 1]
 
   alias SauronReporter.Support
@@ -29,7 +31,7 @@ defmodule SauronReporter.Support.Hook do
 
   @doc false
   def on_mount(_arg, _params, _session, socket) do
-    socket = assign(socket, :sauron_support_unread, 0)
+    socket = assign(socket, sauron_support_unread: 0, sauron_support_open: false)
 
     if connected?(socket) and Support.enabled?() and socket.transport_pid do
       Registry.register(@registry, socket.transport_pid, :listener)
@@ -54,6 +56,9 @@ defmodule SauronReporter.Support.Hook do
 
   defp unread({Support, :unread, count}, socket) when is_integer(count),
     do: {:halt, assign(socket, :sauron_support_unread, count)}
+
+  defp unread({Support, :open, open?}, socket) when is_boolean(open?),
+    do: {:halt, assign(socket, :sauron_support_open, open?)}
 
   defp unread(_message, socket), do: {:cont, socket}
 

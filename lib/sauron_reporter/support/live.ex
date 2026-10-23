@@ -1,38 +1,53 @@
 defmodule SauronReporter.Support.Live do
   @moduledoc """
-  The support panel (plan 29, boards 75–76): the nested LiveView
-  `SauronReporter.Support.panel/1` renders for a signed-in user.
+  The support card (plan 29; 0.9.0: board 78's content, board 79's
+  placement): the nested LiveView `SauronReporter.Support.panel/1`
+  renders for a signed-in user.
+
+  A card of bounded height, opened under the app's own header button
+  (the `anchor`, or the button that ran `open_panel/2` /
+  `toggle_panel/2`), where only the thread scrolls; on a phone, a bottom
+  sheet. Without a header button, a discreet slip at the bottom right
+  (`launcher`) opens it. The `SauronSupport` hook places it, and tells
+  the page when it opens and closes (`sauron-support:open`,
+  `sauron-support:close`); see `SauronReporter.Support`.
 
   Its states: the guided start (« J'ai une idée », « J'ai un problème »,
-  « Parler à quelqu'un »), the user's requests not over yet to resume;
-  describing a problem or an idea, with attachments, then « Terminé »;
-  a live chat searching for somebody, then answered by an operator
-  (typing shown); nobody in 5 minutes, then an email answer and a
-  callback; a screenshot asked, with a capture button; a request over.
+  « Parler à quelqu'un », a person answers), the user's requests not
+  over yet to resume; describing a problem or an idea, with
+  attachments, then « Terminé »; a live chat searching for somebody,
+  then answered by an operator (typing shown); nobody in 5 minutes,
+  then an email answer and a callback; a screenshot asked, with a
+  capture button; a request over. The thread reads as correspondence:
+  each message a dated note under its sender's line, the system's
+  events quiet centred lines, a heading for each day.
 
   The user is the session's — the app's, signed by its endpoint — and
-  every call and event is theirs only: the panel subscribes to its
+  every call and event is theirs only: the card subscribes to its
   user's topic and drops any event of another user, and only ever names
   conversations Sauron gave it for that user.
 
   Events it handles from the page:
 
-    * `"sauron_support:open"`, `"sauron_support:toggle"` — the launcher,
-      or the app's own button (`SauronReporter.Support.open_panel/2`);
+    * `"sauron_support:open"`, `"sauron_support:toggle"`,
+      `"sauron_support:close"` — the slip, or the app's own button
+      (`SauronReporter.Support.open_panel/2`, `toggle_panel/2`,
+      `close_panel/2`); `"close_panel"` — the hook, asked by the page
+      (`sauron-support:close-request`);
     * `"capabilities"` — from the `SauronSupport` hook: screen capture
       is possible in this browser.
 
-  It tells the page's LiveView its unread count through
-  `SauronReporter.Support.Hook` (`@sauron_support_unread`), and learns
-  the page the user is on from it.
+  It tells the page's LiveView its unread count and whether it is open
+  through `SauronReporter.Support.Hook` (`@sauron_support_unread`,
+  `@sauron_support_open`), and learns the page the user is on from it.
 
   Since 0.8.1: every system line is worded here from the facts Sauron
   sends with it (`SauronReporter.Support.Copy`); the team the app named
   goes to Sauron with `open`; each message the user sends has its own
   `ref`, so a retry — the client's after a reconnection, or
-  « Réessayer » — posts it once, and the panel keeps one bubble per id
+  « Réessayer » — posts it once, and the card keeps one message per id
   and per ref; images are shown (`SauronReporter.Support.Preview`),
-  PDFs stay chips.
+  PDFs stay named lines.
   """
 
   use Phoenix.LiveView
@@ -50,6 +65,8 @@ defmodule SauronReporter.Support.Live do
 
   @impl true
   def mount(_params, session, socket) do
+    anchor = session["anchor"]
+
     socket =
       socket
       |> assign(
@@ -59,7 +76,10 @@ defmodule SauronReporter.Support.Live do
         team: session["team"] || "l'équipe",
         # Sent to Sauron only when the app named it.
         named_team: session["team"],
-        launcher: session["launcher"] != false,
+        anchor: anchor,
+        # Without a word from the app: the slip only when no button anchors the card.
+        launcher:
+          if(is_boolean(session["launcher"]), do: session["launcher"], else: is_nil(anchor)),
         page: session["page"],
         note: session["note"],
         idea_hint: session["idea_hint"],
@@ -72,6 +92,7 @@ defmodule SauronReporter.Support.Live do
         current: nil,
         pending: [],
         unread: 0,
+        last_answer: nil,
         typing: nil,
         draft: "",
         form_n: 0,
@@ -102,7 +123,7 @@ defmodule SauronReporter.Support.Live do
     end
   end
 
-  # The page's LiveView (`SauronReporter.Support.Hook`) finds the panel
+  # The page's LiveView (`SauronReporter.Support.Hook`) finds the card
   # by the socket's transport: the same browser tab.
   defp register(socket) do
     if transport = socket.transport_pid do
@@ -128,32 +149,36 @@ defmodule SauronReporter.Support.Live do
       |> then(&assign(&1, :ctx, ctx(&1)))
 
     ~H"""
-    <div id={"#{@socket.id}-root"} class="aide-root" phx-hook={@hook && "SauronSupport"}>
+    <div
+      id={"#{@socket.id}-root"}
+      class="aide-root"
+      phx-hook={@hook && "SauronSupport"}
+      data-panel={@socket.id}
+      data-anchor={@anchor}
+    >
       <button
         :if={@launcher and not @open?}
         type="button"
-        class="aide-launch"
+        class="aide-slip"
         aria-label={launcher_label(@title, @unread)}
         aria-expanded="false"
         phx-click="sauron_support:open"
         phx-mounted={@closed_once && JS.focus()}
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path
-            d="M4 5h16v11H9l-5 4z"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            stroke-linejoin="round"
-          />
+          <rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.8" />
+          <path d="M3 7l9 6 9-6" fill="none" stroke="currentColor" stroke-width="1.8" />
         </svg>
-        {@title}<span :if={@unread > 0} class="aide-badge" aria-hidden="true">{@unread}</span>
+        <span class="aide-slip-t">
+          <b>{@title}</b><small>{slip_line(assigns)}</small>
+        </span>
+        <span :if={@unread > 0} class="aide-badge" aria-hidden="true">{@unread}</span>
       </button>
 
       <section
         :if={@open?}
         id={"#{@socket.id}-panel"}
-        class="aide aide-panel"
+        class={if @launcher and is_nil(@anchor), do: "aide aide-card aide-card-low", else: "aide aide-card"}
         role="dialog"
         aria-labelledby={"#{@socket.id}-title"}
         phx-keydown={JS.pop_focus() |> JS.push("close_panel")}
@@ -163,33 +188,31 @@ defmodule SauronReporter.Support.Live do
         <header class="aide-h">
           <div class="aide-tt">
             <h2 id={"#{@socket.id}-title"} class="aide-title">{@title}</h2>
-            <span class="aide-sub">
+            <p class="aide-sub">
               <i :if={claimed?(@thread)} class="aide-on" aria-hidden="true"></i>{subtitle(@thread, @ctx, @now)}
-            </span>
+            </p>
           </div>
-          <div class="aide-tools">
-            <button
-              type="button"
-              class="aide-ib"
-              aria-label="Réduire"
-              phx-click={JS.pop_focus() |> JS.push("close_panel")}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M5 12h14" stroke="currentColor" stroke-width="1.8" />
-              </svg>
-            </button>
-            <button
-              :if={closable?(@thread)}
-              type="button"
-              class="aide-ib"
-              aria-label="Fermer la demande"
-              phx-click="ask_close"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" />
-              </svg>
-            </button>
-          </div>
+          <button
+            type="button"
+            class="aide-ib"
+            aria-label="Réduire"
+            phx-click={JS.pop_focus() |> JS.push("close_panel")}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 12h14" stroke="currentColor" stroke-width="1.8" />
+            </svg>
+          </button>
+          <button
+            :if={closable?(@thread)}
+            type="button"
+            class="aide-ib"
+            aria-label="Fermer la demande"
+            phx-click="ask_close"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" />
+            </svg>
+          </button>
         </header>
 
         <%= if @thread do %>
@@ -216,42 +239,46 @@ defmodule SauronReporter.Support.Live do
 
     ~H"""
     <div class="aide-t aide-top">
-      <div class="aide-log">
-        <span class="aide-who">{@title}</span>
-        <div class="aide-b aide-auto">
-          <p>{greeting(@user)}</p>
-        </div>
-        <div class="aide-chs" id={"#{@socket.id}-choices"}>
-          <button
-            :for={kind <- [:feature, :issue, :live_chat]}
-            type="button"
-            class="aide-ch"
-            phx-click="choose"
-            phx-value-kind={kind}
-            disabled={@busy == :open}
-          >
-            <b>{Copy.choice(kind)}</b><span>{Copy.hint(kind, @idea_hint)}</span>
-          </button>
-        </div>
-        <div :if={@others != []} class="aide-chs aide-resume">
-          <span class="aide-who">Vos demandes en cours</span>
-          <button
-            :for={thread <- @others}
-            type="button"
-            class="aide-ch"
-            phx-click="resume_thread"
-            phx-value-id={thread["conversation"]["id"]}
-          >
-            <b>{Copy.choice(kind(thread))}</b><span>{summary(thread, @ctx)}</span>
-          </button>
-        </div>
+      <div class="aide-start">
+        <p class="aide-intro">{greeting(@user)}</p>
+        <p class="aide-person">{Copy.person(@team)}</p>
+        <ul class="aide-chs" id={"#{@socket.id}-choices"}>
+          <li :for={kind <- [:feature, :issue, :live_chat]}>
+            <button
+              type="button"
+              class="aide-ch"
+              phx-click="choose"
+              phx-value-kind={kind}
+              disabled={@busy == :open}
+            >
+              <span><b>{Copy.choice(kind)}</b><small>{Copy.hint(kind, @idea_hint)}</small></span>
+              <.chevron />
+            </button>
+          </li>
+        </ul>
+        <%= if @others != [] do %>
+          <h3 class="aide-day">Vos demandes en cours</h3>
+          <ul class="aide-chs aide-resume">
+            <li :for={thread <- @others}>
+              <button
+                type="button"
+                class="aide-ch"
+                phx-click="resume_thread"
+                phx-value-id={thread["conversation"]["id"]}
+              >
+                <span><b>{Copy.choice(kind(thread))}</b><small>{summary(thread, @ctx)}</small></span>
+                <.chevron />
+              </button>
+            </li>
+          </ul>
+        <% end %>
+        <p :if={@link == :down} class="aide-status" role="status">
+          Connexion à l'assistance interrompue : nous réessayons.
+        </p>
+        <p :if={@notice} class="aide-notice" role="alert">{@notice}</p>
+        <p class="aide-foot">{@note || "Vos messages sont lus par #{@team}."}</p>
       </div>
     </div>
-    <p :if={@link == :down} class="aide-status" role="status">
-      Connexion à l'assistance interrompue : nous réessayons.
-    </p>
-    <p :if={@notice} class="aide-notice" role="alert">{@notice}</p>
-    <p class="aide-note">{@note || "Vos messages sont lus par #{@team}."}</p>
     """
   end
 
@@ -278,45 +305,70 @@ defmodule SauronReporter.Support.Live do
       )
 
     ~H"""
-    <div class="aide-t">
+    <div class="aide-t" tabindex="0" aria-label="La correspondance, à faire défiler">
       <div>
         <div class="aide-log" role="log" aria-live="polite" aria-relevant="additions">
-          <div class="aide-b aide-me"><p>{Copy.choice(kind(@thread))}</p></div>
+          <p class="aide-evt">Vous avez choisi « {Copy.choice(kind(@thread))} »</p>
           <%= for entry <- @entries do %>
             <%= case entry do %>
               <% {:day, text} -> %>
-                <span class="aide-evt">{text}</span>
-              <% {:who, text, me?} -> %>
-                <span class={["aide-who", me? && "aide-who-me"]}>{text}</span>
+                <h3 class="aide-day">{text}</h3>
               <% {:evt, text} -> %>
-                <span class="aide-evt">{text}</span>
+                <p class="aide-evt">{text}</p>
               <% {:info, text} -> %>
                 <p class="aide-info">{text}</p>
-              <% {:bubble, style, body} -> %>
-                <div class={["aide-b", "aide-#{style}"]}>
-                  <.body body={body} user_id={@user["id"]} />
-                </div>
+              <% {:note, note} -> %>
+                <article class={["aide-note", "aide-note-#{note.who.style}"]}>
+                  <p class="aide-from">
+                    <b>{note.who.name}</b>{note.who.role} · <time>{note.time}</time>
+                  </p>
+                  <div :for={body <- note.bodies} class="aide-said">
+                    <.body body={body} user_id={@user["id"]} />
+                  </div>
+                </article>
             <% end %>
           <% end %>
-          <%= for item <- @mine do %>
-            <span class="aide-who aide-who-me">Vous</span>
-            <div class="aide-b aide-me aide-pending">
+          <article :for={item <- @mine} class="aide-note aide-note-me aide-pending">
+            <p class="aide-from"><b>Vous</b></p>
+            <div class="aide-said">
               <p :if={item.body}>{item.body}</p>
-              <div :if={item.kind == :file} class="aide-file">
-                <.file_icon /><span>{item.name} <small>{Copy.size(item.size)}</small></span>
-              </div>
-              <p :if={item.status == :sending} class="aide-state">Envoi…</p>
-              <p :if={item.status == :failed} class="aide-state aide-failed">
-                Non envoyé.
-                <button type="button" class="aide-link" phx-click="retry" phx-value-ref={item.ref}>
-                  Réessayer
-                </button>
-                <button type="button" class="aide-link" phx-click="discard" phx-value-ref={item.ref}>
-                  Abandonner
-                </button>
+              <p :if={item.kind == :file} class="aide-file">
+                <.clip_icon /><span>{item.name} <small>· {Copy.size(item.size)}</small></span>
               </p>
             </div>
-          <% end %>
+            <p :if={item.status == :sending} class="aide-state">Envoi…</p>
+            <p :if={item.status == :failed} class="aide-state aide-failed">
+              Non envoyé.
+              <button type="button" class="aide-link" phx-click="retry" phx-value-ref={item.ref}>
+                Réessayer
+              </button>
+              <button type="button" class="aide-link" phx-click="discard" phx-value-ref={item.ref}>
+                Abandonner
+              </button>
+            </p>
+          </article>
+
+          <form
+            :if={"callback" in @modules and @converted and not @over}
+            class="aide-box"
+            id={"#{@socket.id}-callback"}
+            phx-submit="callback"
+          >
+            <label for={"#{@socket.id}-phone"}>Votre numéro, pour être rappelé</label>
+            <div class="aide-row">
+              <input
+                id={"#{@socket.id}-phone"}
+                name="phone"
+                type="tel"
+                autocomplete="tel"
+                placeholder="06 00 00 00 00"
+                required
+              />
+              <button type="submit" class="aide-btn aide-pri" disabled={@busy == :callback}>
+                Rappelez-moi
+              </button>
+            </div>
+          </form>
         </div>
         <p :if={@typing_name} class="aide-typing" role="status">
           <span class="aide-dots" aria-hidden="true"><i></i><i></i><i></i></span>{@typing_name} écrit…
@@ -328,7 +380,7 @@ defmodule SauronReporter.Support.Live do
       Connexion à l'assistance interrompue : vos messages partiront dès son retour.
     </p>
 
-    <div :if={@confirm_close} class="aide-cb" role="group" aria-labelledby={"#{@socket.id}-confirm"}>
+    <div :if={@confirm_close} class="aide-box aide-fixed" role="group" aria-labelledby={"#{@socket.id}-confirm"}>
       <p id={"#{@socket.id}-confirm"} class="aide-strong">
         Clore cette demande ? Vous ne pourrez plus y écrire.
       </p>
@@ -341,7 +393,7 @@ defmodule SauronReporter.Support.Live do
     </div>
 
     <div :if={"screenshot" in @modules and not @later and not @over} class="aide-req" role="status">
-      <p>
+      <p class="aide-strong">
         <.camera_icon />{screenshot_line(@thread)}
       </p>
       <div class="aide-row">
@@ -356,31 +408,9 @@ defmodule SauronReporter.Support.Live do
         <label for={@uploads.files.ref} class={["aide-btn", not @can_capture && "aide-pri"]}>
           Choisir une image
         </label>
-        <button type="button" class="aide-btn aide-lite" phx-click="later">Plus tard</button>
+        <button type="button" class="aide-link aide-later" phx-click="later">Plus tard</button>
       </div>
     </div>
-
-    <form
-      :if={"callback" in @modules and @converted and not @over}
-      class="aide-cb"
-      id={"#{@socket.id}-callback"}
-      phx-submit="callback"
-    >
-      <label for={"#{@socket.id}-phone"}>Votre numéro, pour être rappelé</label>
-      <div class="aide-row">
-        <input
-          id={"#{@socket.id}-phone"}
-          name="phone"
-          type="tel"
-          autocomplete="tel"
-          placeholder="06 00 00 00 00"
-          required
-        />
-        <button type="submit" class="aide-btn aide-pri" disabled={@busy == :callback}>
-          Rappelez-moi
-        </button>
-      </div>
-    </form>
 
     <p :if={@notice} class="aide-notice" role="alert">{@notice}</p>
 
@@ -412,7 +442,7 @@ defmodule SauronReporter.Support.Live do
       <textarea
         id={"#{@socket.id}-message-#{@form_n}"}
         name="message"
-        rows="2"
+        rows="3"
         placeholder={@placeholder}
         data-aide-enter
         phx-mounted={JS.focus()}
@@ -420,24 +450,16 @@ defmodule SauronReporter.Support.Live do
       <div class="aide-row">
         <%= if "upload" in @modules do %>
           <.live_file_input upload={@uploads.files} class="aide-file-input" />
-          <label for={@uploads.files.ref} class="aide-btn aide-ic" title="Joindre un fichier">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M20 11l-8.5 8.5a5 5 0 01-7-7L13 4a3.5 3.5 0 015 5l-8.5 8.5a2 2 0 01-3-3L14 7"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-              />
-            </svg>
-            <span class="aide-sr">Joindre un fichier</span>
+          <label for={@uploads.files.ref} class="aide-tool">
+            <.clip_icon />Joindre<span class="aide-sr"> un fichier</span>
           </label>
           <button
             :if={@can_capture}
             type="button"
-            class="aide-btn"
+            class="aide-tool"
             phx-click={JS.dispatch("sauron:capture")}
           >
-            <.camera_icon />Capture d'écran
+            <.camera_icon />Capture<span class="aide-sr"> d'écran</span>
           </button>
         <% end %>
         <button type="submit" class="aide-btn aide-pri aide-send">Envoyer</button>
@@ -502,7 +524,7 @@ defmodule SauronReporter.Support.Live do
     """
   end
 
-  # An image, fetched for the user by the panel's server.
+  # An image, fetched for the user by the card's server.
   defp body(%{body: {:image, file}} = assigns) do
     assigns = assign(assigns, :file, file)
 
@@ -522,16 +544,29 @@ defmodule SauronReporter.Support.Live do
 
     ~H"""
     <p :if={@file["caption"]}>{@file["caption"]}</p>
-    <div class="aide-file">
-      <.file_icon /><span>{@file["name"]} <small>{Copy.size(@file["size"])}</small></span>
-    </div>
+    <p class="aide-file">
+      <.clip_icon /><span>{@file["name"]} <small>· {Copy.file_kind(@file)}{Copy.size(@file["size"])}</small></span>
+    </p>
     """
   end
 
-  defp file_icon(assigns) do
+  defp clip_icon(assigns) do
     ~H"""
-    <svg width="14" height="16" viewBox="0 0 18 20" aria-hidden="true">
-      <path d="M2 1h9l5 5v13H2z M11 1v5h5" fill="none" stroke="currentColor" stroke-width="1.6" />
+    <svg viewBox="0 0 24 24" aria-hidden="true" class="aide-icon">
+      <path
+        d="M20 11l-8.5 8.5a5 5 0 01-7-7L13 4a3.5 3.5 0 015 5l-8.5 8.5a2 2 0 01-3-3L14 7"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+      />
+    </svg>
+    """
+  end
+
+  defp chevron(assigns) do
+    ~H"""
+    <svg viewBox="0 0 24 24" aria-hidden="true" class="aide-icon">
+      <path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" />
     </svg>
     """
   end
@@ -557,8 +592,9 @@ defmodule SauronReporter.Support.Live do
 
   # ---------- what the thread shows ----------
 
-  # The messages as lines: a day when it changes, who speaks when it
-  # changes (or after five minutes), the bubbles and the system's lines.
+  # The messages as correspondence: a heading for each day, a note for
+  # each sender's words — the next message of the same sender within
+  # five minutes joins their note — and the system's events between.
   defp entries(thread, ctx, now, zone) do
     today = Copy.local(now, zone)
     searching? = searching?(thread)
@@ -570,76 +606,81 @@ defmodule SauronReporter.Support.Live do
         local = Copy.local(at, zone) || today
         day = NaiveDateTime.to_date(local)
 
-        acc =
-          if day != prev.day and (prev.day != nil or day != NaiveDateTime.to_date(today)),
-            do: [{:day, Copy.day(local, today)} | acc],
-            else: acc
+        {acc, prev} =
+          if day != prev.day,
+            do: {[{:day, Copy.day(local, today)} | acc], %{prev | day: day, who: nil}},
+            else: {acc, prev}
 
-        prev = if day != prev.day, do: %{prev | day: day, who: nil}, else: prev
-        {lines, who} = message_lines(message, ctx, local, searching?)
-
-        who_line =
-          case lines do
-            [] ->
-              []
-
-            [{:evt, _} | _] ->
-              []
-
-            _ ->
-              if who.key != prev.who or gap?(prev.at, at),
-                do: [{:who, "#{who.label} · #{Copy.time(local)}", who.me}],
-                else: []
-          end
-
-        # A system line between two people: whoever speaks next is named.
-        prev =
-          case lines do
-            [] -> prev
-            [{:evt, _} | _] -> %{prev | who: nil, at: at}
-            _ -> %{prev | who: who.key, at: at}
-          end
-
-        {Enum.reverse(who_line ++ lines) ++ acc, prev}
+        {lines, who} = message_lines(message, ctx, searching?)
+        Enum.reduce(lines, {acc, prev}, &add_line(&1, &2, who, at, local))
       end)
 
     Enum.reverse(entries)
   end
 
+  defp add_line({:said, body}, {acc, prev}, who, at, local) do
+    acc =
+      case acc do
+        [{:note, note} | rest] when prev.who == who.key ->
+          if gap?(prev.at, at),
+            do: [new_note(who, local, body) | acc],
+            else: [{:note, %{note | bodies: note.bodies ++ [body]}} | rest]
+
+        _ ->
+          [new_note(who, local, body) | acc]
+      end
+
+    {acc, %{prev | who: who.key, at: at}}
+  end
+
+  # A system line between two people: whoever speaks next is named again.
+  defp add_line({:evt, text}, {acc, prev}, _who, at, local),
+    do: {[{:evt, "#{text} · #{Copy.time(local)}"} | acc], %{prev | who: nil, at: at}}
+
+  defp add_line({:info, text}, {acc, prev}, _who, _at, _local),
+    do: {[{:info, text} | acc], %{prev | who: nil}}
+
+  defp new_note(who, local, body),
+    do: {:note, %{who: who, time: Copy.time(local), bodies: [body]}}
+
   defp gap?(nil, _at), do: false
   defp gap?(_prev, nil), do: false
   defp gap?(prev, at), do: DateTime.diff(at, prev) > 300
 
-  defp message_lines(%{"author" => %{"kind" => "user"}} = message, _ctx, _local, _searching?) do
-    {[{:bubble, :me, content(message["content"])}], %{key: :user, label: "Vous", me: true}}
+  defp message_lines(%{"author" => %{"kind" => "user"}} = message, _ctx, _searching?) do
+    {[{:said, content(message["content"])}], %{key: :user, name: "Vous", role: nil, style: :me}}
   end
 
-  defp message_lines(%{"author" => %{"kind" => "operator"} = author} = message, _ctx, _local, _s) do
-    name = Copy.first_name(author["name"]) || "L'équipe"
+  defp message_lines(%{"author" => %{"kind" => "operator"} = author} = message, ctx, _s) do
+    who =
+      case Copy.first_name(author["name"]) do
+        nil -> %{name: Copy.capitalize(ctx.team), role: nil}
+        name -> %{name: name, role: ", de #{ctx.team}"}
+      end
 
-    {[{:bubble, :them, content(message["content"])}],
-     %{key: {:operator, author["id"] || author["name"]}, label: name, me: false}}
+    {[{:said, content(message["content"])}],
+     Map.merge(who, %{key: {:operator, author["id"] || author["name"]}, style: :them})}
   end
 
-  defp message_lines(message, ctx, local, searching?) do
-    who = %{key: :system, label: ctx.title, me: false}
+  defp message_lines(message, ctx, searching?) do
+    who = %{key: :system, name: ctx.title, role: " · message automatique", style: :auto}
 
     case Copy.system(message["content"] || %{}, ctx) do
       {:event, text} ->
-        {[{:evt, "#{text} · #{Copy.time(local)}"}], who}
+        {[{:evt, text}], who}
 
       # Only while it is true: once somebody answered, or nobody did,
       # the next lines say so.
       {:searching, text} ->
         if searching?,
-          do: {[{:bubble, :auto, {:searching, text, true}}, {:info, Copy.waiting_info()}], who},
+          do: {[{:said, {:searching, text, true}}, {:info, Copy.waiting_info()}], who},
           else: {[], who}
 
       {:paragraphs, paragraphs} ->
-        {[{:bubble, :auto, {:paragraphs, paragraphs}}], who}
+        {[{:said, {:paragraphs, paragraphs}}], who}
 
       {:line, text} ->
-        {[{:bubble, :auto, {:text, text}}], who}
+        {[{:said, {:text, text}}], who}
     end
   end
 
@@ -778,10 +819,20 @@ defmodule SauronReporter.Support.Live do
 
   defp greeting(user) do
     case Copy.first_name(user["name"]) do
-      nil -> "Bonjour — comment pouvons-nous vous aider ?"
-      name -> "Bonjour #{name} — comment pouvons-nous vous aider ?"
+      nil -> "Bonjour. Que souhaitez-vous faire ?"
+      name -> "Bonjour #{name}. Que souhaitez-vous faire ?"
     end
   end
+
+  # The slip's second line: the last answer while one waits, else the invitation.
+  defp slip_line(%{unread: n, last_answer: %{who: who, at: at}} = assigns) when n > 0 do
+    case Copy.local(Copy.parse(at), assigns.time_zone) do
+      nil -> "#{who} vous a répondu"
+      local -> "#{who} vous a répondu · #{Copy.time(local)}"
+    end
+  end
+
+  defp slip_line(assigns), do: "Écrire à #{assigns.team}"
 
   defp launcher_label(title, 0), do: title
   defp launcher_label(title, 1), do: "#{title}, 1 nouvelle réponse"
@@ -805,6 +856,7 @@ defmodule SauronReporter.Support.Live do
     if socket.assigns.open?, do: {:noreply, close(socket)}, else: {:noreply, open(socket)}
   end
 
+  def handle_event("sauron_support:close", _params, socket), do: {:noreply, close(socket)}
   def handle_event("close_panel", _params, socket), do: {:noreply, close(socket)}
 
   def handle_event("capabilities", params, socket) do
@@ -1053,6 +1105,7 @@ defmodule SauronReporter.Support.Live do
 
   def handle_info({Support, :hello, pid}, socket) do
     send(pid, {Support, :unread, socket.assigns.unread})
+    send(pid, {Support, :open, socket.assigns.open?})
     {:noreply, socket}
   end
 
@@ -1146,7 +1199,9 @@ defmodule SauronReporter.Support.Live do
         socket
 
       answer?(message) ->
-        socket |> assign(:unread, socket.assigns.unread + 1) |> notify()
+        socket
+        |> assign(unread: socket.assigns.unread + 1, last_answer: last_answer(message, socket))
+        |> notify()
 
       true ->
         socket
@@ -1160,6 +1215,14 @@ defmodule SauronReporter.Support.Live do
 
   defp answer?(_message), do: false
 
+  defp last_answer(message, socket) do
+    who =
+      Copy.first_name(get_in(message, ["author", "name"])) ||
+        Copy.capitalize(socket.assigns.team)
+
+    %{who: who, at: message["inserted_at"]}
+  end
+
   # ---------- doing ----------
 
   defp open(socket) do
@@ -1169,7 +1232,11 @@ defmodule SauronReporter.Support.Live do
   end
 
   defp close(socket) do
-    assign(socket, open?: false, closed_once: true, confirm_close: false)
+    if socket.assigns.open? do
+      socket |> assign(open?: false, closed_once: true, confirm_close: false) |> notify()
+    else
+      socket
+    end
   end
 
   defp show(socket, id) do
@@ -1344,11 +1411,14 @@ defmodule SauronReporter.Support.Live do
     end
   end
 
-  # The unread count to the page's LiveView (`SauronReporter.Support.Hook`).
+  # The unread count, and whether the card is open, to the page's
+  # LiveView (`SauronReporter.Support.Hook`).
   defp notify(socket) do
     if transport = socket.transport_pid do
-      for {pid, :listener} <- Registry.lookup(@registry, transport),
-          do: send(pid, {Support, :unread, socket.assigns.unread})
+      for {pid, :listener} <- Registry.lookup(@registry, transport) do
+        send(pid, {Support, :unread, socket.assigns.unread})
+        send(pid, {Support, :open, socket.assigns.open?})
+      end
     end
 
     socket

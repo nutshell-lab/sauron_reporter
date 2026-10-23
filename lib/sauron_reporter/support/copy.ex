@@ -42,6 +42,22 @@ defmodule SauronReporter.Support.Copy do
   def hint(:issue, _), do: "Pas urgent : décrivez-le, nous répondons par e-mail."
   def hint(:live_chat, _), do: "Maintenant, en direct, si quelqu'un est disponible."
 
+  @doc "Under the greeting: who answers is a person (0.9.0)."
+  def person(team) do
+    "Une personne de #{team} vous répond — ce n'est pas un assistant automatique."
+  end
+
+  @doc "What a file is, before its size on its line: « image, », « PDF, »."
+  def file_kind(%{"content_type" => "application/pdf"}), do: "PDF, "
+  def file_kind(%{"content_type" => "image/" <> _}), do: "image, "
+  def file_kind(%{"type" => "image"}), do: "image, "
+
+  def file_kind(%{"name" => name}) when is_binary(name) do
+    if String.downcase(Path.extname(name)) == ".pdf", do: "PDF, ", else: ""
+  end
+
+  def file_kind(_file), do: ""
+
   @doc "While a live chat waits for somebody."
   def waiting_info do
     "D'habitude, quelqu'un répond en quelques minutes. Sans réponse sous 5 minutes, " <>

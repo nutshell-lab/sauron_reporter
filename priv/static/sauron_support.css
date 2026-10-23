@@ -1,23 +1,39 @@
 /*
- * SauronReporter.Support — the support panel (Sauron plan 29, boards 75–76).
+ * SauronReporter.Support — the support card (Sauron plan 29; 0.9.0:
+ * board 78's correspondence, board 79's placement).
  *
- * Every colour, face and radius comes from a variable the app sets, on
- * :root or any ancestor of the panel; each has a default here:
+ * Every colour, face, radius and size comes from a variable the app
+ * sets, on :root or any ancestor of the card; each has a default here:
  *
- *   --aide-font            the face                      system-ui
- *   --aide-bg              the panel, fields              #FFFFFF
- *   --aide-surface         header, assistant bubbles      #F3F6F9
- *   --aide-ink             text, borders of buttons       #1E1F21
- *   --aide-muted           secondary text, icons          #4E5052
- *   --aide-line            separators, soft borders       #CED1D4
- *   --aide-field           borders of fields and choices  #848689
- *   --aide-accent          primary buttons, operators     #00516C
- *   --aide-accent-ink      text on the accent             #FFFFFF
- *   --aide-mark            the unread badge, errors       #900F21
- *   --aide-ok              the « somebody is here » dot   #095717
- *   --aide-radius          bubbles, fields, boxes         6px
- *   --aide-button-radius   buttons                        6px
- *   --aide-top             where the panel starts (under a sticky header)  0px
+ *   --aide-font            the face                         system-ui
+ *   --aide-bg              the card, fields                 #FFFFFF
+ *   --aide-surface         attachments waiting, boxes       #F3F6F9
+ *   --aide-ink             text, borders of buttons         #1E1F21
+ *   --aide-muted           secondary text, icons            #4E5052
+ *   --aide-line            the card's border, separators    #CED1D4
+ *   --aide-field           borders of fields                #848689
+ *   --aide-accent          primary buttons, the slip's icon #00516C
+ *   --aide-accent-ink      text on the accent               #FFFFFF
+ *   --aide-mark            the unread badge, errors         #900F21
+ *   --aide-ok              the « somebody is here » dot     #095717
+ *   --aide-radius          fields, boxes, images            6px
+ *   --aide-button-radius   buttons                          6px
+ *   --aide-top             the app's sticky header: the card and the
+ *                          sheet stay below it              0px
+ *   since 0.9.0:
+ *   --aide-width           the card's width                 400px
+ *   --aide-max-h           the card's height at most        600px
+ *                          (never past the window: min(--aide-max-h,
+ *                          100vh - --aide-top - 32px), less when the
+ *                          card opens lower, under its button)
+ *   --aide-card-radius     the card, the slip               8px
+ *   --aide-shadow          the card, the slip               0 12px 28px rgba(0, 0, 0, 0.14)
+ *   --aide-z               their z-index                    1000
+ *   --aide-note-size       the text of the notes            15px
+ *
+ * The hook sets --aide-at-top, --aide-at-right, --aide-at-pointer and
+ * --aide-at-pointer-shown on <html>: where the card's button is. Not
+ * the app's to set.
  */
 
 .aide-root {
@@ -35,97 +51,167 @@
   outline-offset: 2px;
 }
 
-/* the launcher, bottom right */
-.aide-launch {
+/* the slip, bottom right: for an app without a header button */
+.aide-slip {
   position: fixed;
   right: 16px;
-  bottom: 16px;
-  z-index: 1000;
-  height: 48px;
-  padding: 0 20px 0 16px;
-  border: 0;
-  border-radius: var(--aide-button-radius, 6px);
-  background: var(--aide-accent, #00516C);
-  color: var(--aide-accent-ink, #FFFFFF);
-  font-family: var(--aide-font, system-ui, sans-serif);
-  font-size: 15px;
-  font-weight: 700;
-  display: inline-flex;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  z-index: var(--aide-z, 1000);
+  display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
+  width: min(320px, calc(100vw - 32px));
+  min-height: 60px;
+  padding: 10px 14px 10px 16px;
+  border: 1.5px solid var(--aide-line, #CED1D4);
+  border-radius: var(--aide-card-radius, 8px);
+  background: var(--aide-bg, #FFFFFF);
+  box-shadow: var(--aide-shadow, 0 12px 28px rgba(0, 0, 0, 0.14));
+  color: var(--aide-ink, #1E1F21);
+  font-family: var(--aide-font, system-ui, sans-serif);
+  text-align: left;
   cursor: pointer;
 }
 
-.aide-launch svg {
-  width: 20px;
-  height: 20px;
+.aide-slip svg {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  color: var(--aide-accent, #00516C);
+}
+
+.aide-slip-t {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.aide-slip-t b {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.aide-slip-t small {
+  font-size: 13px;
+  color: var(--aide-muted, #4E5052);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .aide-badge {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  min-width: 20px;
-  height: 20px;
-  border-radius: 10px;
+  flex: none;
+  min-width: 22px;
+  height: 22px;
+  border-radius: 11px;
   background: var(--aide-mark, #900F21);
   color: #FFFFFF;
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 700;
   display: grid;
   place-items: center;
-  padding: 0 5px;
-  border: 2px solid var(--aide-bg, #FFFFFF);
+  padding: 0 6px;
 }
 
-/* the panel */
+/* the card: bounded; only the thread scrolls */
 .aide {
   font-family: var(--aide-font, system-ui, sans-serif);
   background: var(--aide-bg, #FFFFFF);
   color: var(--aide-ink, #1E1F21);
-  display: flex;
-  flex-direction: column;
   font-size: 14px;
   line-height: 1.45;
   min-width: 0;
 }
 
-.aide-panel {
+.aide-card {
   position: fixed;
-  top: var(--aide-top, 0px);
-  right: 0;
-  bottom: 0;
-  z-index: 1000;
-  width: min(420px, 100vw);
-  border-left: 1px solid var(--aide-line, #CED1D4);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+  z-index: var(--aide-z, 1000);
+  top: var(--aide-at-top, calc(var(--aide-top, 0px) + 16px));
+  right: var(--aide-at-right, 16px);
+  width: var(--aide-width, 400px);
+  max-width: calc(100vw - 32px);
+  max-height: min(var(--aide-max-h, 600px), calc(100vh - var(--aide-at-top, calc(var(--aide-top, 0px) + 16px)) - 16px));
+  max-height: min(var(--aide-max-h, 600px), calc(100dvh - var(--aide-at-top, calc(var(--aide-top, 0px) + 16px)) - 16px));
+  display: flex;
+  flex-direction: column;
+  border: 1.5px solid var(--aide-line, #CED1D4);
+  border-radius: var(--aide-card-radius, 8px);
+  box-shadow: var(--aide-shadow, 0 12px 28px rgba(0, 0, 0, 0.14));
+}
+
+/* the pointer towards the button, when the hook placed the card under it */
+.aide-card::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  right: var(--aide-at-pointer, 24px);
+  width: 14px;
+  height: 14px;
+  background: var(--aide-bg, #FFFFFF);
+  border-left: 1.5px solid var(--aide-line, #CED1D4);
+  border-top: 1.5px solid var(--aide-line, #CED1D4);
+  transform: rotate(45deg);
+  visibility: var(--aide-at-pointer-shown, hidden);
+}
+
+/* opened from the slip: above it, bottom right */
+.aide-card-low {
+  top: auto;
+  right: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  max-height: min(var(--aide-max-h, 600px), calc(100vh - var(--aide-top, 0px) - 32px));
+  max-height: min(var(--aide-max-h, 600px), calc(100dvh - var(--aide-top, 0px) - 32px));
+}
+
+.aide-card-low::before {
+  display: none;
+}
+
+/* a phone: a bottom sheet, the app's header in sight */
+@media (max-width: 640px) {
+  .aide-card,
+  .aide-card-low {
+    top: auto;
+    left: 16px;
+    right: 16px;
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    width: auto;
+    max-width: none;
+    max-height: min(70vh, calc(100vh - var(--aide-top, 0px) - 32px));
+    max-height: min(70dvh, calc(100dvh - var(--aide-top, 0px) - 32px));
+  }
+
+  .aide-card::before {
+    display: none;
+  }
 }
 
 .aide-h {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 8px 10px 16px;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 4px 10px 16px;
   border-bottom: 1px solid var(--aide-line, #CED1D4);
-  background: var(--aide-surface, #F3F6F9);
   flex: none;
 }
 
 .aide-tt {
-  display: grid;
-  gap: 1px;
+  flex: 1;
   min-width: 0;
+  padding-top: 2px;
 }
 
 .aide-title {
   margin: 0;
-  font-size: 16px;
-  line-height: 1.3;
-  font-weight: 600;
+  font-size: 17px;
+  line-height: 1.25;
+  font-weight: 700;
   color: var(--aide-ink, #1E1F21);
 }
 
 .aide-sub {
+  margin: 2px 0 0;
   font-size: 13px;
   color: var(--aide-muted, #4E5052);
   display: flex;
@@ -142,15 +228,10 @@
   flex: none;
 }
 
-.aide-tools {
-  margin-left: auto;
-  display: flex;
-  gap: 2px;
-}
-
 .aide-ib {
   width: 44px;
   height: 44px;
+  flex: none;
   border: 0;
   background: transparent;
   border-radius: var(--aide-button-radius, 6px);
@@ -166,12 +247,19 @@
   height: 18px;
 }
 
+.aide-icon {
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+
 /* the thread: anchored at the bottom, scrolls up */
 .aide-t {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 16px 14px;
+  overscroll-behavior: contain;
+  padding: 0 16px 8px;
   display: flex;
   flex-direction: column-reverse;
 }
@@ -184,63 +272,59 @@
 .aide-log {
   display: flex;
   flex-direction: column;
-  gap: 10px;
 }
 
-.aide-who {
-  font-size: 12px;
+/* a day */
+.aide-day {
+  margin: 14px 0 0;
+  font-size: 12.5px;
+  font-weight: 700;
   color: var(--aide-muted, #4E5052);
-  margin-bottom: -6px;
 }
 
-.aide-who-me {
-  align-self: flex-end;
+/* a note: who wrote, when, and their words */
+.aide-note {
+  padding: 10px 0 12px;
+  border-bottom: 1px solid var(--aide-line, #CED1D4);
 }
 
-.aide-b {
-  max-width: 86%;
-  padding: 8px 11px;
-  border-radius: var(--aide-radius, 6px);
-  font-size: 14px;
-  line-height: 1.45;
+.aide-log > .aide-note:last-child {
+  border-bottom: 0;
+}
+
+.aide-from {
+  margin: 0;
+  font-size: 13px;
+  color: var(--aide-muted, #4E5052);
+}
+
+.aide-from b {
+  color: var(--aide-ink, #1E1F21);
+  font-weight: 700;
+}
+
+.aide-from time {
+  font-variant-numeric: tabular-nums;
+}
+
+.aide-said p {
+  margin: 6px 0 0;
+  font-size: var(--aide-note-size, 15px);
+  line-height: 1.55;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.aide-b p {
-  margin: 0;
-  white-space: pre-wrap;
+.aide-said p + p {
+  margin-top: 10px;
 }
 
-.aide-b p + p {
-  margin-top: 6px;
-}
-
-/* the assistant's voice: no one behind it */
-.aide-auto {
-  align-self: flex-start;
-  background: var(--aide-surface, #F3F6F9);
-  color: var(--aide-ink, #1E1F21);
-}
-
-/* a person of the team */
-.aide-them {
-  align-self: flex-start;
-  background: var(--aide-accent, #00516C);
-  color: var(--aide-accent-ink, #FFFFFF);
-}
-
-/* the user */
-.aide-me {
-  align-self: flex-end;
-  background: var(--aide-bg, #FFFFFF);
-  border: 1px solid var(--aide-ink, #1E1F21);
-}
-
-.aide-pending {
-  border-style: dashed;
+.aide-pending .aide-said {
+  color: var(--aide-muted, #4E5052);
 }
 
 .aide-state {
+  margin: 6px 0 0;
   font-size: 12.5px;
   color: var(--aide-muted, #4E5052);
 }
@@ -250,45 +334,46 @@
   font-weight: 600;
 }
 
-/* what happened: a short line, centred */
+/* what happened: a quiet line, centred */
 .aide-evt {
-  align-self: center;
+  margin: 10px 0;
   font-size: 12.5px;
   color: var(--aide-muted, #4E5052);
   text-align: center;
-  margin: 2px 0;
 }
 
+/* an attachment: a named line */
+.aide-said .aide-file,
 .aide-file {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 7px;
-  padding: 6px 8px;
-  border: 1px solid var(--aide-line, #CED1D4);
-  border-radius: var(--aide-radius, 6px);
-  background: var(--aide-surface, #F3F6F9);
+  margin: 8px 0 0;
+  min-height: 28px;
+  font-size: 14px;
+  line-height: 1.35;
   color: var(--aide-ink, #1E1F21);
+  white-space: normal;
+}
+
+.aide-file .aide-icon {
+  color: var(--aide-muted, #4E5052);
+}
+
+.aide-file small {
   font-size: 13px;
+  color: var(--aide-muted, #4E5052);
 }
 
-.aide-file svg {
-  flex: none;
-}
-
-/* an image of the conversation (0.8.1), fetched by the app's server */
+/* an image of the conversation (0.8.1), fetched by the app's server, inside the note */
 .aide-shot-wrap {
-  margin-top: 7px;
-}
-
-.aide-shot-wrap:first-child {
-  margin-top: 0;
+  margin-top: 8px;
 }
 
 .aide-shot {
   display: block;
   max-width: 100%;
-  max-height: 320px;
+  max-height: 220px;
   height: auto;
   border: 1px solid var(--aide-line, #CED1D4);
   border-radius: var(--aide-radius, 6px);
@@ -296,34 +381,48 @@
 }
 
 .aide-shot-wrap .aide-file {
-  margin-top: 0;
+  margin-top: 4px;
 }
 
-.aide-file small {
+/* the guided start */
+.aide-intro {
+  margin: 14px 0 2px;
+  font-size: var(--aide-note-size, 15px);
+  line-height: 1.55;
+}
+
+.aide-person {
+  margin: 0 0 4px;
+  font-size: 13.5px;
   color: var(--aide-muted, #4E5052);
 }
 
 .aide-chs {
-  display: grid;
-  gap: 8px;
-  margin-top: 2px;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
 }
 
-.aide-resume {
-  margin-top: 12px;
+.aide-chs li {
+  border-top: 1px solid var(--aide-line, #CED1D4);
+}
+
+.aide-chs li:last-child {
+  border-bottom: 1px solid var(--aide-line, #CED1D4);
 }
 
 .aide-ch {
-  display: grid;
-  gap: 2px;
-  text-align: left;
   width: 100%;
-  padding: 11px 13px;
-  border: 1px solid var(--aide-field, #848689);
-  border-radius: var(--aide-radius, 6px);
-  background: var(--aide-bg, #FFFFFF);
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border: 0;
+  background: transparent;
   font: inherit;
   color: var(--aide-ink, #1E1F21);
+  text-align: left;
   cursor: pointer;
 }
 
@@ -332,13 +431,31 @@
   opacity: 0.6;
 }
 
-.aide-ch b {
-  font-size: 15px;
-  font-weight: 600;
+.aide-ch span {
+  flex: 1;
+  min-width: 0;
 }
 
-.aide-ch span {
-  font-size: 13px;
+.aide-ch b {
+  display: block;
+  font-size: 15.5px;
+  font-weight: 700;
+}
+
+.aide-ch small {
+  display: block;
+  margin-top: 2px;
+  font-size: 13.5px;
+  color: var(--aide-muted, #4E5052);
+}
+
+.aide-ch .aide-icon {
+  color: var(--aide-muted, #4E5052);
+}
+
+.aide-foot {
+  margin: 14px 0 6px;
+  font-size: 12.5px;
   color: var(--aide-muted, #4E5052);
 }
 
@@ -384,14 +501,13 @@
 }
 
 .aide-typing {
-  margin: 10px 0 0;
+  margin: 4px 0 0;
   font-size: 12.5px;
   color: var(--aide-muted, #4E5052);
 }
 
 .aide-info {
-  align-self: stretch;
-  margin: 0;
+  margin: 4px 0 8px;
   border: 1px dashed var(--aide-field, #848689);
   border-radius: var(--aide-radius, 6px);
   padding: 9px 11px;
@@ -400,12 +516,12 @@
 }
 
 .aide-status,
-.aide-notice,
-.aide-note {
+.aide-notice {
   margin: 0;
-  padding: 0 14px 10px;
+  padding: 6px 16px;
   font-size: 12.5px;
   color: var(--aide-muted, #4E5052);
+  flex: none;
 }
 
 .aide-notice {
@@ -413,99 +529,95 @@
   font-weight: 600;
 }
 
+.aide-start .aide-status,
+.aide-start .aide-notice,
 .aide-c .aide-notice {
-  padding: 0;
+  padding: 8px 0 0;
 }
 
-/* an operator asks for a screenshot */
-.aide-req {
-  margin: 0 12px 10px;
-  padding: 11px 12px;
-  border: 1.5px solid var(--aide-ink, #1E1F21);
-  border-radius: var(--aide-radius, 6px);
-  background: var(--aide-surface, #F3F6F9);
-  display: grid;
-  gap: 9px;
-  flex: none;
-}
-
-.aide-req p {
+.aide-strong {
   margin: 0;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 700;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.aide-icon {
-  width: 18px;
-  height: 18px;
-  flex: none;
-}
-
-/* the callback, the confirmation */
-.aide-cb {
-  margin: 0 12px 10px;
-  padding: 11px 12px;
-  border: 1px solid var(--aide-line, #CED1D4);
+/* an operator asks for a screenshot: a box, bordered all round */
+.aide-req {
+  margin: 8px 12px;
+  padding: 10px 12px;
+  border: 1.5px solid var(--aide-ink, #1E1F21);
   border-radius: var(--aide-radius, 6px);
-  background: var(--aide-surface, #F3F6F9);
   display: grid;
-  gap: 7px;
+  gap: 8px;
   flex: none;
 }
 
-.aide-cb label,
-.aide-strong {
-  margin: 0;
-  font-size: 13.5px;
-  font-weight: 600;
+/* the callback (in the thread), the confirmation (above the composer) */
+.aide-box {
+  margin: 12px 0 4px;
+  padding: 10px 12px;
+  border: 1.5px solid var(--aide-line, #CED1D4);
+  border-radius: var(--aide-radius, 6px);
+  display: grid;
+  gap: 8px;
 }
 
-.aide-cb input {
+.aide-fixed {
+  margin: 8px 12px;
+  flex: none;
+}
+
+.aide-box label {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.aide-box input {
+  flex: 1 1 150px;
+  min-width: 0;
+  min-height: 44px;
   font: inherit;
   font-size: 15px;
-  min-height: 44px;
   border: 1px solid var(--aide-field, #848689);
   border-radius: var(--aide-radius, 6px);
   padding: 0 10px;
   background: var(--aide-bg, #FFFFFF);
   color: var(--aide-ink, #1E1F21);
-  min-width: 0;
-  flex: 1;
 }
 
 .aide-row {
   display: flex;
-  gap: 6px;
+  gap: 4px 6px;
   align-items: center;
   flex-wrap: wrap;
 }
 
-/* the composer */
+/* the composer: stays put under the thread */
 .aide-c {
   border-top: 1px solid var(--aide-line, #CED1D4);
-  padding: 10px 12px 12px;
+  padding: 10px 14px 12px;
   display: grid;
-  gap: 8px;
-  background: var(--aide-bg, #FFFFFF);
+  gap: 6px;
   flex: none;
 }
 
 .aide-c > label {
   font-size: 13px;
-  color: var(--aide-muted, #4E5052);
+  font-weight: 700;
 }
 
 .aide-c textarea {
   font: inherit;
-  font-size: 14px;
+  font-size: var(--aide-note-size, 15px);
+  line-height: 1.5;
   border: 1px solid var(--aide-field, #848689);
   background: var(--aide-bg, #FFFFFF);
   border-radius: var(--aide-radius, 6px);
-  padding: 9px 10px;
-  min-height: 46px;
+  padding: 8px 10px;
+  min-height: 72px;
   resize: none;
   color: var(--aide-ink, #1E1F21);
   width: 100%;
@@ -539,21 +651,14 @@
   opacity: 0.6;
 }
 
-.aide-btn svg {
-  width: 17px;
-  height: 17px;
-  flex: none;
-}
-
 .aide-pri {
   background: var(--aide-accent, #00516C);
   color: var(--aide-accent-ink, #FFFFFF);
   border-color: var(--aide-accent, #00516C);
 }
 
-.aide-ic {
-  width: 44px;
-  padding: 0;
+.aide-lite {
+  border-color: var(--aide-line, #CED1D4);
 }
 
 .aide-send {
@@ -564,8 +669,25 @@
   width: 100%;
 }
 
-.aide-lite {
-  border-color: var(--aide-line, #CED1D4);
+/* a tool of the composer: a word and its icon, no frame */
+.aide-tool {
+  min-height: 44px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--aide-button-radius, 6px);
+  background: transparent;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--aide-ink, #1E1F21);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.aide-tool .aide-icon {
+  color: var(--aide-muted, #4E5052);
 }
 
 .aide-link {
@@ -577,7 +699,15 @@
   font-weight: 600;
   color: inherit;
   text-decoration: underline;
+  text-underline-offset: 3px;
   cursor: pointer;
+}
+
+.aide-later {
+  min-height: 44px;
+  padding: 0 4px;
+  font-size: 13.5px;
+  color: var(--aide-muted, #4E5052);
 }
 
 .aide-again {

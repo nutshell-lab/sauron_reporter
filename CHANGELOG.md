@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.9.0 — 2026-10-23
+
+The support panel's new form, decided by the product owner on 23/10:
+board 78's content (the thread as correspondence) in board 79's
+placement (a card anchored to the app's own button) — no more
+full-height panel.
+
+**Breaking**
+
+- **The layout**: the full-height side panel (`.aide-panel`, fixed from
+  `--aide-top` to the bottom of the window) is gone. The card is
+  `--aide-width` wide (400px) and `--aide-max-h` high at most (600px;
+  never past the window, `min(--aide-max-h, 100vh - --aide-top - 32px)`),
+  and only its thread scrolls: the header (the title, the request's
+  state) and the composer stay put. On a phone (640px or less), a
+  bottom sheet: the screen's width less 16px each side, 70% of its
+  height at most, the app's header in sight. Rules an app wrote for
+  `.aide-panel`, `.aide-launch`, `.aide-b`/`.aide-me`/`.aide-them`/
+  `.aide-auto`, `.aide-tools` or `.aide-cb` no longer match anything.
+- **The default launcher**: `launcher` now defaults to `nil` — the slip
+  shows only when no `anchor` is given. The launcher itself is now a
+  discreet slip at the bottom right (board 78): the title and the last
+  answer waiting (« Thomas vous a répondu · 09:32 », with the count),
+  else « Écrire à <team> »; the card opens above it.
+- `--aide-top` is no longer where the panel starts: it keeps the card
+  and the sheet below the app's sticky header.
+
+**New**
+
+- **Anchored to the app's header button**: `anchor` (a CSS selector,
+  `"#support-button"`) — the `SauronSupport` hook opens the card under
+  it, aligned to its right edge, with a small pointer, and follows it on
+  resize and scroll. Without an `anchor`, under the button that ran
+  `open_panel/2` or `toggle_panel/2`: they now dispatch
+  `sauron-support:trigger` from it. Échap (on the card or the button)
+  and the button (`toggle_panel/2`) close it; the focus goes back to
+  the button. The hook writes the position as CSS variables on
+  `<html>` (`--aide-at-*`), which the LiveView never patches.
+- **One drawer at a time**: the hook dispatches `sauron-support:open`
+  and `sauron-support:close` on `window` (`detail: {id, trigger}`), and
+  closes the card on `sauron-support:close-request` (the app's script)
+  or `phx:sauron-support:close-request` (the app's server,
+  `push_event/3`). `close_panel/2`, a JS command, closes it from the
+  app's other drawers' buttons; the panel's LiveView takes
+  `"sauron_support:close"`.
+- `SauronReporter.Support.Hook` assigns `@sauron_support_open` too: the
+  header button's `aria-expanded` and pressed look.
+- **The thread as correspondence**: no bubbles — each message a dated
+  note under its sender's line (« Thomas, de l'équipe m2 · 09:32 »,
+  « Vous · 09:30 », « Assistance · message automatique »; the same
+  sender's next message within five minutes joins the note), the text
+  at `--aide-note-size` (15px), attachments as named lines
+  (« plan.pdf · PDF, 1,4 Mo »; images previewed inside the note, their
+  name under them), the system's events quiet centred lines, a heading
+  for every day (the first one included). The screenshot asked is a
+  box bordered all round; the callback form sits in the thread; the
+  composer is a three-line field with « Joindre » and « Capture ».
+- **The guided start says a person answers**: « Une personne de
+  <team> vous répond — ce n'est pas un assistant automatique. », under
+  « Bonjour Camille. Que souhaitez-vous faire ? », and the three choices
+  as a plain list, one line each (`SauronReporter.Support.Copy.person/1`).
+- CSS variables: `--aide-width` (400px), `--aide-max-h` (600px),
+  `--aide-card-radius` (8px), `--aide-shadow`, `--aide-z` (1000),
+  `--aide-note-size` (15px). Every 0.8 variable still applies.
+
 ## 0.8.1 — 2026-10-23
 
 The support chat adopts the protocol Sauron completed in plan 29's step

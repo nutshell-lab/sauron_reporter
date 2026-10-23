@@ -1,7 +1,8 @@
 defmodule SauronReporter.Support.Preview do
   @moduledoc """
   An image of the conversation, shown in the panel (0.8.1): a
-  LiveComponent the panel renders for each `image` message.
+  LiveComponent the panel renders for each `image` message — the image
+  inside the note, its name as a line under it (0.9.0).
 
   The panel's server fetches the image from Sauron for the panel's user
   (`SauronReporter.Support.fetch_file/3`, `GET /support/files/:id?user_id=…`,
@@ -12,7 +13,7 @@ defmodule SauronReporter.Support.Preview do
   A component, so the image crosses the LiveView socket once: the
   panel's log re-renders on every message, a component only when its
   own assigns change. Images past `preview_max_size` (3 MB by default;
-  `0` turns previews off), a fetch that fails, and PDFs stay chips. An
+  `0` turns previews off), a fetch that fails, and PDFs stay named lines. An
   app with a Content-Security-Policy allows `img-src data:`.
   """
 
@@ -81,12 +82,17 @@ defmodule SauronReporter.Support.Preview do
         alt={"Image jointe : #{@file["name"]}"}
         loading="lazy"
       />
-      <div :if={is_nil(@src)} class="aide-file">
-        <svg width="14" height="16" viewBox="0 0 18 20" aria-hidden="true">
-          <path d="M2 1h9l5 5v13H2z M11 1v5h5" fill="none" stroke="currentColor" stroke-width="1.6" />
+      <p class="aide-file">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="aide-icon">
+          <path
+            d="M20 11l-8.5 8.5a5 5 0 01-7-7L13 4a3.5 3.5 0 015 5l-8.5 8.5a2 2 0 01-3-3L14 7"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+          />
         </svg>
-        <span>{@file["name"]} <small>{Copy.size(@file["size"])}</small></span>
-      </div>
+        <span>{@file["name"]} <small>· {Copy.file_kind(@file)}{Copy.size(@file["size"])}</small></span>
+      </p>
     </div>
     """
   end
