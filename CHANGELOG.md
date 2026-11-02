@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.1 — 2026-11-02
+
+**New**
+
+- `browser: [kind:, scripts:]`: what the browser caused is not
+  reported. For an app that forwards its pages' JavaScript errors under
+  one kind, the script as the first frame's file, such an error goes to
+  Sauron only when it comes from one of the app's own scripts — a URL
+  on the request's host whose path starts with one of `scripts` — or
+  names no URL and says something (an unhandled rejection). An
+  extension's script, another origin's, Facebook's and Instagram's
+  in-app browser running its own code on the page
+  (`window._META.IABInnerFrame`), and the empty « Script error. » stay
+  in the app's ErrorTracker. Without the option, nothing changes.
+
 ## 0.9.0 — 2026-10-23
 
 The support panel's new form, decided by the product owner on 23/10:

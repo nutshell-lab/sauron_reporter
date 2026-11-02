@@ -230,6 +230,55 @@ defmodule SauronReporterTest do
     refute caused?.("Elixir.Not.A.Loaded.Module", "boom")
   end
 
+  test "what the browser caused is not reported: only the app's own scripts' errors" do
+    configure(browser: [kind: "MyApp.ClientError", scripts: ["/assets/"]])
+
+    # As the app's controller writes a browser's report: the script as the
+    # first frame's file, or the message when the browser names none.
+    of_kind? = fn file, reason, kind ->
+      occurrence = %ErrorTracker.Occurrence{
+        reason: reason,
+        context: %{"request.host" => "wodlane.com"},
+        stacktrace: %ErrorTracker.Stacktrace{
+          lines: [
+            %ErrorTracker.Stacktrace.Line{
+              module: "browser",
+              function: "script",
+              file: file,
+              line: 1
+            }
+          ]
+        }
+      }
+
+      SauronReporter.client_caused?(error(%{kind: kind, reason: reason}), occurrence)
+    end
+
+    caused? = fn file, reason -> of_kind?.(file, reason, "Elixir.MyApp.ClientError") end
+
+    # Facebook's in-app browser runs its code on the page itself (01/11).
+    assert caused?.(
+             "https://wodlane.com/competitions/alea-060c0ecef7da?fbclid=PAZ",
+             "TypeError: undefined is not an object (evaluating 'window._META.IABInnerFrame')"
+           )
+
+    # Another origin's script, as the browser hides it: no file, no words.
+    assert caused?.("Script error.", "Script error.")
+    assert caused?.("chrome-extension://abcdef/content.js", "TypeError: x is null")
+    assert caused?.("https://connect.facebook.net/assets/sdk.js", "ReferenceError: fbq")
+
+    # The app's own script, and a rejection that names no file, report.
+    refute caused?.("https://wodlane.com/assets/app-GIFC7R4E.js", "TypeError: x is undefined")
+    refute caused?.("unhandledrejection: Network error", "unhandledrejection: Network error")
+
+    # Another kind is not the browser's.
+    refute of_kind?.("https://wodlane.com/x", "boom", "Elixir.RuntimeError")
+
+    # Without the option, every browser error reports, as before.
+    configure([])
+    refute caused?.("chrome-extension://abcdef/content.js", "TypeError: x is null")
+  end
+
   test "a client-caused occurrence is not sent at all" do
     test = self()
 

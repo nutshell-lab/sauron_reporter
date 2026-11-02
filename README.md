@@ -17,7 +17,7 @@ IPs, headers or job arguments.
 
 ```elixir
 # mix.exs
-{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.9.0"}
+{:sauron_reporter, github: "nutshell-lab/sauron_reporter", tag: "v0.9.1"}
 ```
 
 ErrorTracker is configured by the app (its repo is the local buffer):
@@ -551,6 +551,15 @@ HTTP status (`Plug.Exception`) is below 500, and `Bandit.TransportError`,
 stay in the app's ErrorTracker but are not sent to Sauron. `ignore:`
 adds an app's own — `[{"MyApp.ClientError", "LiveView not connected"}]`
 (a kind and a text within the reason), or a kind alone.
+
+Since 0.9.1, what the browser caused too, for an app that forwards its
+pages' JavaScript errors: `browser: [kind: "MyApp.ClientError", scripts:
+["/assets/"]]` sends such an error only when its first frame's file is
+one of the app's scripts on the request's host, or names no URL (an
+unhandled rejection) and is not the empty « Script error. ». A page
+runs code that is not the app's — extensions, ad blockers, the in-app
+browser of Facebook and Instagram — and its errors are not the app's to
+fix.
 
 ## Logs: one journal entry per event (0.2.0)
 

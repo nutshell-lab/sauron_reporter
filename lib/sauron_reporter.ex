@@ -28,6 +28,7 @@ defmodule SauronReporter do
         redact: {M2.Redactor, :reason},          # fun(reason) -> reason, after the email mask
         self_noise: ["M2.Observability."],       # more modules whose errors never report
         ignore: [{"MyApp.ClientError", "LiveView not connected"}], # {kind, text in the reason}, or a kind alone
+        browser: [kind: "MyApp.ClientError", scripts: ["/assets/"]], # the browser's errors, from the app's scripts only
         deliver: nil,                            # or {mod, fun}(app, payload): in-process, Sauron's own
         req_options: []                          # tests inject a Req.Test plug
 
@@ -38,6 +39,18 @@ defmodule SauronReporter do
   `ignore` adds an app's own: a kind, or `{kind, text}` — the text
   matched within the reason. Text, not a regex: on OTP 28 a compiled
   regex is a runtime reference, not a value runtime config should hold.
+
+  What the browser caused is not reported either (0.9.1), for an app
+  that forwards its pages' JavaScript errors under one kind (`browser`'s
+  `kind`), the script as the first frame's file. Such an error reports
+  only when it comes from one of the app's own scripts: a URL on the
+  request's host whose path starts with one of `scripts`. A page holds
+  code that is not the app's — an extension, an ad blocker, the in-app
+  browser of Facebook or Instagram, which runs its own on the page
+  (`window._META.IABInnerFrame`) — and its errors name another file, the
+  page itself, or none. An error that names no URL (an unhandled
+  rejection) reports, unless it is « Script error. »: a browser's word
+  for another origin's script, with nothing in it.
 
   Inert unless `app` is set and either `url` and `token` or `deliver`:
   the configuration is read when the application starts, so it belongs
@@ -235,7 +248,35 @@ defmodule SauronReporter do
     reason = occurrence.reason || error.reason || ""
 
     kind in @client_kinds or below_500?(kind) or
-      Enum.any?(config()[:ignore] || [], &ignored?(&1, kind, reason))
+      Enum.any?(config()[:ignore] || [], &ignored?(&1, kind, reason)) or
+      not_the_apps_script?(config()[:browser], kind, reason, occurrence)
+  end
+
+  # A browser error reports when its file is one of the app's scripts on
+  # the request's host, or when it names no URL and says something.
+  defp not_the_apps_script?(browser, kind, reason, occurrence) when is_list(browser) do
+    if short(browser[:kind] || "") == kind do
+      file = first_file(occurrence)
+
+      if is_binary(file) and file =~ ~r{^[a-z][a-z0-9+.-]*://}i,
+        do: not own_script?(URI.parse(file), browser, occurrence),
+        else: String.trim(reason) == "Script error."
+    else
+      false
+    end
+  end
+
+  defp not_the_apps_script?(_browser, _kind, _reason, _occurrence), do: false
+
+  defp first_file(%{stacktrace: %{lines: [%{file: file} | _]}}), do: file
+  defp first_file(_occurrence), do: nil
+
+  defp own_script?(%URI{scheme: scheme, host: host, path: path}, browser, occurrence) do
+    request_host = (occurrence.context || %{})["request.host"]
+
+    scheme in ["http", "https"] and (is_nil(request_host) or host == request_host) and
+      is_binary(path) and
+      Enum.any?(browser[:scripts] || [], &String.starts_with?(path, &1))
   end
 
   defp ignored?({k, text}, kind, reason) when is_binary(text),
