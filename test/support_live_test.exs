@@ -186,7 +186,7 @@ defmodule SauronReporter.SupportLiveTest do
              "Une personne de l&#39;équipe m2 vous répond — ce n&#39;est pas un assistant automatique."
 
     # A plain list of the three choices, one line each.
-    assert html =~ ~s(<ul class="aide-chs" id="sauron-support-choices">)
+    assert html =~ ~s(id="sauron-support-choices")
     assert length(String.split(html, ~s(<li><button type="button" class="aide-ch"))) == 4
     assert html =~ "J&#39;ai une idée"
     assert html =~ "J&#39;ai un problème"
@@ -416,6 +416,42 @@ defmodule SauronReporter.SupportLiveTest do
 
     html = panel |> element("button", "Nouvelle demande") |> render_click()
     assert html =~ "Que souhaitez-vous faire ?"
+  end
+
+  test "back from a request nobody wrote in: closed in Sauron, gone from the list, the start again" do
+    {_view, panel} = page()
+    open(panel)
+    choose(panel, "J'ai une idée")
+    id = current(panel)
+
+    panel |> element(~s(button[aria-label="Retour"])) |> render_click()
+    html = render_async(panel)
+
+    assert html =~ "Que souhaitez-vous faire ?"
+    refute html =~ "Vos demandes en cours"
+    refute html =~ ~s(aria-label="Retour")
+    assert FakeSauron.conversation(id).request["state"] == "closed"
+  end
+
+  test "back from a draft with a message, or a live chat: it stays, to come back to" do
+    {_view, panel} = page()
+    open(panel)
+    choose(panel, "J'ai une idée")
+    id = current(panel)
+    say(panel, "Un export des inscrits")
+
+    html = panel |> element(~s(button[aria-label="Retour"])) |> render_click()
+    assert html =~ "Vos demandes en cours"
+    assert FakeSauron.conversation(id).request["state"] == "open"
+
+    choose(panel, "Parler à quelqu'un")
+    live = current(panel)
+    panel |> element(~s(button[aria-label="Retour"])) |> render_click()
+    assert FakeSauron.conversation(live).request["state"] == "open"
+
+    html = panel |> element(~s(button[phx-value-id="#{id}"])) |> render_click()
+    assert html =~ "Un export des inscrits"
+    assert html =~ "sauron-support-composer"
   end
 
   test "files chosen for one request do not ride into the next" do

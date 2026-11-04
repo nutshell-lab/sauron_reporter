@@ -196,6 +196,10 @@
   flex: none;
 }
 
+.aide-back {
+  margin-left: -12px;
+}
+
 .aide-tt {
   flex: 1;
   min-width: 0;

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.2 — 2026-11-04
+
+**New**
+
+- A back arrow in the panel's header, on every request. Picking « J'ai
+  une idée » opened the request and left no way out but « Réduire ». A
+  request nobody wrote in is closed on the way back, so it waits nowhere;
+  one with a message stays in « Vos demandes en cours ». What was typed
+  and not sent is dropped, as when moving between requests. Needs no
+  change in Sauron.
+
 ## 0.9.1 — 2026-11-02
 
 **New**

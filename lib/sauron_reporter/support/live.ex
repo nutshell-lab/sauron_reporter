@@ -186,6 +186,17 @@ defmodule SauronReporter.Support.Live do
         phx-mounted={is_nil(@thread) && JS.focus_first(to: "##{@socket.id}-choices")}
       >
         <header class="aide-h">
+          <button
+            :if={@thread}
+            type="button"
+            class="aide-ib aide-back"
+            aria-label="Retour"
+            phx-click="back"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.8" />
+            </svg>
+          </button>
           <div class="aide-tt">
             <h2 id={"#{@socket.id}-title"} class="aide-title">{@title}</h2>
             <p class="aide-sub">
@@ -242,7 +253,7 @@ defmodule SauronReporter.Support.Live do
       <div class="aide-start">
         <p class="aide-intro">{greeting(@user)}</p>
         <p class="aide-person">{Copy.person(@team)}</p>
-        <ul class="aide-chs" id={"#{@socket.id}-choices"}>
+        <ul class="aide-chs" id={"#{@socket.id}-choices"} phx-mounted={JS.focus_first()}>
           <li :for={kind <- [:feature, :issue, :live_chat]}>
             <button
               type="button"
@@ -713,6 +724,17 @@ defmodule SauronReporter.Support.Live do
   defp searching?(%{"request" => %{"kind" => "live_chat", "state" => "open"}}), do: true
   defp searching?(_), do: false
 
+  defp untouched?(%{assigns: %{threads: threads, current: id, pending: pending}}) do
+    case threads[id] do
+      %{"request" => %{"state" => "open", "submitted_at" => nil}} = thread ->
+        not Enum.any?(thread["messages"] || [], &(&1["author"]["kind"] == "user")) and
+          not Enum.any?(pending, &(&1.cid == id))
+
+      _ ->
+        false
+    end
+  end
+
   defp closable?(nil), do: false
   defp closable?(thread), do: kind(thread) == :live_chat and not over?(thread)
 
@@ -893,6 +915,18 @@ defmodule SauronReporter.Support.Live do
      socket
      |> forget_uploads()
      |> assign(current: nil, notice: nil, confirm_close: false, draft: "")}
+  end
+
+  # Back to the start. A request nobody wrote in goes with it: picked by
+  # mistake, it would wait in « Vos demandes en cours », and in Sauron,
+  # for good. One with a message stays there, to come back to.
+  def handle_event("back", _params, socket) do
+    {:noreply, socket} =
+      if untouched?(socket),
+        do: call(socket, :close, &Support.close/1),
+        else: {:noreply, socket}
+
+    handle_event("new_request", %{}, socket)
   end
 
   def handle_event("draft", params, socket) do
