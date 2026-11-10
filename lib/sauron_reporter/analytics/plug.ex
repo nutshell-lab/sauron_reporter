@@ -69,6 +69,7 @@ defmodule SauronReporter.Analytics.Plug do
   import Plug.Conn
 
   alias SauronReporter.Analytics
+  alias SauronReporter.Analytics.Units
 
   @impl Plug
   def init(opts), do: opts
@@ -78,6 +79,8 @@ defmodule SauronReporter.Analytics.Plug do
     if Analytics.enabled?() and not Analytics.ignored_path?(conn.request_path) do
       started = System.monotonic_time()
       conn = fetch_cookies(conn)
+      # The request is a unit: its queries counted (0.10.0).
+      if Keyword.get(opts, :timings, true), do: Units.start()
 
       conn
       |> mark_session(Analytics.ours?(conn))
@@ -101,15 +104,21 @@ defmodule SauronReporter.Analytics.Plug do
     ours? = ours_assigns? or Analytics.ignore_cookie?(conn)
 
     if Keyword.get(opts, :timings, true) do
+      unit = Units.stop()
+
       Analytics.push(
-        Map.merge(context, %{
+        context
+        |> Map.merge(%{
           "kind" => "timing",
           "method" => conn.method,
           "route" => route,
           "status" => conn.status,
           "duration_ms" => Float.round(duration_ms, 2)
         })
+        |> Map.merge(Units.timing_fields(unit))
       )
+
+      Units.log_slow(unit, duration_ms, %{"phase" => "http", "route" => route})
     end
 
     if page_requests?(opts) and not ours? and page_request?(conn) do

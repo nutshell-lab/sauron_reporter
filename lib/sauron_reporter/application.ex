@@ -13,6 +13,10 @@ defmodule SauronReporter.Application do
       # Analytics events (plan 28) wait here between two sends; inert
       # until `analytics: [enabled: true]`.
       SauronReporter.Analytics.Buffer,
+      # Where a slow answer spends its time (0.10.0): the units, their
+      # queries, LiveView's callbacks; inert without `repos` or
+      # `live_timings`.
+      SauronReporter.Analytics.Units,
       # Support (plan 29): the page's LiveView and the panel find each
       # other here; the client is the app's one WebSocket to Sauron,
       # inert until `support: [enabled: true, pubsub: ...]`.

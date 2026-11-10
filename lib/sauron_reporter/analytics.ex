@@ -25,6 +25,11 @@ defmodule SauronReporter.Analytics do
           flush_every: 5_000,        # ms between two sends
           batch_size: 50,            # a send as soon as this many wait
           max_buffer: 5_000,         # beyond, the oldest are dropped and counted
+          repos: [],                 # [MyApp.Repo]: time in the database on every timing (0.10.0)
+          live_timings: false,       # true: LiveView's mount, params and events timed (0.10.0)
+          slow_ms: 500,              # an answer this slow logs its slow and repeated statements
+          statement_ms: 100,         # a statement this slow in one run is logged…
+          repeated: 10,              # …or one run this many times in the answer
           deliver: nil,              # or {mod, fun}(app, payload): tests, Sauron itself
           req_options: []            # merged into Req's (tests: a Req.Test plug)
         ]
@@ -36,6 +41,9 @@ defmodule SauronReporter.Analytics do
     * `SauronReporter.Analytics.Hook` — a page view when a page's live
       connection opens and per live navigation;
     * `track/3` — a custom event, from a conn, a socket or a map;
+    * `SauronReporter.Analytics.Units` (0.10.0) — where a slow answer
+      spends its time: the database on every timing, the slow
+      statements to the log, LiveView's callbacks timed;
     * `SauronReporter.Analytics.Buffer` — holds the events and sends
       them in batches; runs in this library's application, inert while
       analytics is not enabled.

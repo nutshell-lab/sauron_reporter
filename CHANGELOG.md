@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.10.0 — 2026-11-10
+
+Sauron's plan 45: where a slow answer spends its time. Needs Sauron
+0.1.74 or later to keep the new fields (an older one ignores them).
+
+**New**
+
+- `repos: [MyApp.Repo]`: every timing carries `db_ms` (query and
+  decode), `db_queue_ms` (waiting for a connection) and `queries`,
+  from Ecto's query telemetry. A task's queries count for the answer
+  that started it while it runs, never for the next.
+- A slow answer (`slow_ms`, 500) writes one `sauron.slow_statement`
+  line per statement that was slow (`statement_ms`, 100) or repeated
+  (`repeated`, 10): its fingerprint, count, time, worst run and wait,
+  and the statement with its placeholders — never a parameter. At most
+  10 lines an answer.
+- `live_timings: true`: a LiveView's connected mount, `handle_params`
+  and `handle_event` (a LiveComponent's too) are timings, with `phase`
+  `mount`, `params` or `event`, the event's `name`, status 500 when it
+  raised. The HTTP render stays the plug's.
+- Off unless configured: without `repos` or `live_timings`, nothing
+  changes.
+
 ## 0.9.2 — 2026-11-04
 
 **New**

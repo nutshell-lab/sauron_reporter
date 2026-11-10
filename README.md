@@ -111,6 +111,40 @@ SauronReporter.Analytics.track(conn, "signup", %{plan: "pro"})
 
 Every option is in `SauronReporter.Analytics`'s moduledoc.
 
+## Where a slow answer spends its time (0.10.0)
+
+Sauron's plan 45. With `repos:`, every timing carries its time in the
+database, its wait for a connection and its number of queries; a slow
+answer writes its slow and repeated statements to the app's log, where
+Sauron's logs find them. With `live_timings: true`, a LiveView's
+connected mount, `handle_params` and `handle_event` are timed too, with
+their `phase` — the plug times only the first, HTTP render.
+
+```elixir
+config :sauron_reporter,
+  analytics: [
+    enabled: true,
+    repos: [MyApp.Repo],  # Ecto's query telemetry: db_ms, db_queue_ms, queries
+    live_timings: true,   # mount, params and events timed (phase: mount | params | event)
+    slow_ms: 500,         # an answer this slow logs its statements…
+    statement_ms: 100,    # …those this slow in one run…
+    repeated: 10          # …or run this many times (an N+1)
+  ]
+```
+
+A line per statement, at most 10 an answer, never a parameter:
+
+```
+sauron.slow_statement phase=http route="/competitions/:competition_id/schedule" request_id=F8k…
+  answer_ms=15836 fingerprint=3fa2c1b04e7d count=48 query_ms=3120 max_ms=210 queue_ms=40
+  statement="SELECT h0.id … WHERE (h0.stage_id = $1)"
+```
+
+A task's queries (`Task.async`, parallel preloads, `start_async`) count
+for the answer that started it, while that answer runs; queries outside
+any answer (`handle_info`, `handle_async`, Oban jobs) are not counted.
+See `SauronReporter.Analytics.Units`.
+
 ## Support chat (0.8.0, 0.8.1, 0.9.0)
 
 Sauron's plan 29: a signed-in user reports a problem, proposes an idea
